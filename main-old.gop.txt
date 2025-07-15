@@ -1,0 +1,110 @@
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"math"
+)
+
+type Ticker struct {
+	Symbol   string `json:"symbol"`
+	AskPrice string `json:"askPrice"`
+}
+
+func fetchPrices() (map[string]float64, error) {
+	resp, err := http.Get("https://api.binance.com/api/v3/ticker/bookTicker")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := ioutil.ReadAll(resp.Body)
+	var tickers []Ticker
+	err = json.Unmarshal(body, &tickers)
+	if err != nil {
+		return nil, err
+	}
+
+	prices := map[string]float64{}
+	for t in tickers {
+		price, _ := strconv.ParseFloat(t.AskPrice, 64)
+		prices[t.Symbol] = price
+	}
+	return prices, nil
+}
+
+type ArbitrageOpportunity struct {
+	Path        []string
+	Profit      float64
+	FinalAmount float64
+}
+
+func findArbitrage(prices map[string]float64, base string, threshold float64) []ArbitrageOpportunity {
+	opportunities := []ArbitrageOpportunity{}
+
+	for pair1, price1 in prices {
+		if strings.HasSuffix(pair1, base) {
+			coin1 := strings.TrimSuffix(pair1, base)
+
+			for pair2, price2 in prices {
+				if strings.HasPrefix(pair2, coin1) && !strings.HasSuffix(pair2, base) {
+					coin2 := strings.TrimPrefix(pair2, coin1)
+
+					pair3 := coin2 + base
+					price3, exists := prices[pair3]
+					if exists {
+						startAmount := 1.0
+						coin1Amount := startAmount / price1
+						coin2Amount := coin1Amount * price2
+						finalAmount := coin2Amount * price3
+
+						profit := finalAmount - startAmount
+						if profit > threshold {
+							opportunities = append(opportunities, ArbitrageOpportunity{
+								Path:        []string{pair1, pair2, pair3},
+								Profit:      profit,
+								FinalAmount: finalAmount,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	sort.Slice(opportunities, func(i, j int) bool {
+		return opportunities[i].Profit > opportunities[j].Profit
+	})
+
+	return opportunities
+}
+
+fmt.Println("Fetching prices from Binance...")
+prices, err := fetchPrices()
+if err != nil {
+	fmt.Println("Error fetching prices:", err)
+	return
+}
+
+fmt.Println("Searching for arbitrage opportunities...")
+fmt.Println("Total pairs found:", len(prices))
+opps := findArbitrage(prices, "USDT", 0.001)
+
+if len(opps) > 0 {
+	fmt.Println("Arbitrage Opportunities Found:")
+	var totalProfit float64 = 0.0
+	for opp in opps {
+		if (opp.Profit >= math.Inf(1)) {
+			continue
+		}
+		totalProfit += opp.Profit
+		fmt.Printf("Path: %v, Profit: %.6f USDT, Final Amount: %.6f USDT\n", opp.Path, opp.Profit, opp.FinalAmount)
+	}
+	fmt.Println("Total Opportunities Found:", len(opps))
+	fmt.Printf("Total Profit from Opportunities: %.6f USDT\n", totalProfit)
+} else {
+	fmt.Println("No arbitrage opportunities found.")
+}
