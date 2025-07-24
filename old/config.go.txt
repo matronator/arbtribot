@@ -13,7 +13,6 @@ type Config struct {
 	APIKey         string // Binance API Key (for live trading)
 	APISecret      string // Binance API Secret (for live trading)
 	FeeRate        float64 // Binance spot trading fee rate (default 0.001 = 0.1%)
-	DebugMode      bool   // Enable debug logging
 }
 
 func LoadConfig() *Config {
@@ -25,7 +24,6 @@ func LoadConfig() *Config {
 			APIKey:         "",
 			APISecret:      "",
 			FeeRate:        0.001,    // 0.1% fee = 0.001
-			DebugMode:      false, // Default to false, can be set via env
 		}
 	}
 
@@ -40,6 +38,5 @@ func LoadConfig() *Config {
 		APIKey:         os.Getenv("BINANCE_API_KEY"),
 		APISecret:      os.Getenv("BINANCE_SECRET_KEY"),
 		FeeRate:        fee,
-		DebugMode:      os.Getenv("DEBUG_MODE") == "true",
 	}
 }
