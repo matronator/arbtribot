@@ -13,24 +13,28 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-func Info(format string, args ...any) {
-	log.Info().Msgf(format, args...)
+func InfoFmt(format string, args ...any) {
+	log.Info().Caller(1).Msgf(format, args...)
 }
 
-func Warning(format string, args ...any) {
-	log.Warn().Msgf(format, args...)
+func WarningFmt(format string, args ...any) {
+	log.Warn().Caller(1).Msgf(format, args...)
 }
 
-func Error(format string, args ...any) {
-	log.Error().Msgf(format, args...)
+func ErrorFmt(format string, args ...any) {
+	log.Error().Stack().Caller(1).Msgf(format, args...)
 }
 
-func SetUpLogger(debugMode bool) {
+func Error(err error) {
+	log.Error().Stack().Caller(1).Err(err).Send()
+}
+
+func SetUpLogger() {
 	var writers []io.Writer
 
-	if debugMode {
+	if cfg.DebugMode {
 		writers = append(writers, zerolog.ConsoleWriter{
-			Out: os.Stdout,
+			Out:        os.Stdout,
 			TimeFormat: time.DateTime,
 			FormatLevel: func(i any) string {
 				return outputLevelColor(i.(string), fmt.Sprintf("[%s]", strings.ToUpper(i.(string))))
@@ -41,7 +45,7 @@ func SetUpLogger(debugMode bool) {
 	writers = append(writers, newRollingFile())
 	mw := io.MultiWriter(writers...)
 
-	log.Logger = log.Output(mw).With().Caller().Logger()
+	log.Logger = log.Output(mw).With().Logger()
 	log.Info().Msg("Logger initialized")
 }
 

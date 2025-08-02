@@ -10,4 +10,5 @@ func BenchmarkFillPairs(b *testing.B) {
 	for _, symbol := range AllSymbols {
 		fmt.Println(symbol)
 	}
+	fmt.Println("AllPairs: ", len(AllSymbols))
 }

@@ -1,12 +1,20 @@
 package main
 
 import (
+	"arbitrage/currency"
+	"arbitrage/utils"
+
+	binance "github.com/binance/binance-connector-go"
 	"github.com/rs/zerolog/log"
 )
 
+var AccountBalances Balances
+var cfg *utils.Config
+var client *binance.Client
+
 func main() {
-	cfg := LoadConfig()
-	SetUpLogger(cfg.DebugMode)
+	cfg = utils.LoadConfig()
+	SetUpLogger()
 	log.Info().
 		Bool("SIMULATION_MODE", cfg.SimulationMode).
 		Bool("DEBUG_MODE", cfg.DebugMode).
@@ -15,13 +23,36 @@ func main() {
 		Float64("FEE_RATE", cfg.FeeRate).
 		Msg("Bot started with config from .env file")
 	if cfg.SimulationMode {
-		Info("MODE: %s %s", Green("SIMULATION"), Italic(Dim("(no real trades will be placed, only logs)")))
+		InfoFmt("MODE: %s %s", Green("SIMULATION"), Italic(Dim("(no real trades will be placed, only logs)")))
 	} else {
-		Info("MODE: %s %s", Yellow("LIVE TRADING"), Italic(BgYellow("(real trades will be placed)")))
+		InfoFmt("MODE: %s %s", Yellow("LIVE TRADING"), Italic(BgYellow("(real trades will be placed)")))
+	}
+
+	client = binance.NewClient(cfg.APIKey, cfg.APISecret)
+
+	currency.FillPairs()
+
+	added, err := FillOrderBook()
+	if err != nil {
+		Error(err)
+		ErrorFmt("OrderBook not filled. Added %d symbols", added)
+		return
+	}
+	InfoFmt("OrderBook filled with %d symbols.", added)
+
+	if !cfg.SimulationMode {
+		AccountBalances, err = CheckAccountBalance()
+		if err != nil {
+			Error(err)
+		}
+
+		// ConvertAllToUSDC()
+
+		// ConnectToExchange()
 	}
 
 	defer func() {
-		Info("Bot is shutting down...")
-		Info("See you next time! %s", Blue("Arbtribot ended..."))
+		InfoFmt("Bot is shutting down...")
+		InfoFmt("See you next time! %s", Blue("Arbtribot ended..."))
 	}()
 }
