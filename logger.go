@@ -29,6 +29,12 @@ func Error(err error) {
 	log.Error().Stack().Caller(1).Err(err).Send()
 }
 
+func DebugFmt(format string, args ...any) {
+	if cfg.DebugMode {
+		log.Debug().Caller(1).Msgf(format, args...)
+	}
+}
+
 func SetUpLogger() {
 	var writers []io.Writer
 

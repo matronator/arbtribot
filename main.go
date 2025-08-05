@@ -2,6 +2,7 @@ package main
 
 import (
 	"arbitrage/currency"
+	"arbitrage/orderbook"
 	"arbitrage/utils"
 
 	binance "github.com/binance/binance-connector-go"
@@ -32,7 +33,13 @@ func main() {
 
 	currency.FillPairs()
 
-	added, err := FillOrderBook()
+	OrderBook, err := orderbook.FillOrderBook(client)
+	if err != nil {
+		Error(err)
+		return
+	}
+
+	added, err := OrderBook.FillPrices(client)
 	if err != nil {
 		Error(err)
 		ErrorFmt("OrderBook not filled. Added %d symbols", added)

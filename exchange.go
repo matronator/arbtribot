@@ -4,7 +4,6 @@ import (
 	"arbitrage/arbitrage"
 	"arbitrage/currency"
 	"arbitrage/orderbook"
-	"context"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -22,80 +21,6 @@ func Test() {
 }
 
 var OrderBook *orderbook.Orderbook
-
-func FillOrderBook() (added int, err error) {
-	info, err := client.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
-		return 0, err
-	}
-
-	OrderBook = orderbook.New()
-
-	for _, symbol := range info.Symbols {
-		if _, ok := currency.AllSymbols[symbol.Symbol]; !ok {
-			continue
-		}
-
-		f := orderbook.ExchangeFilter{}
-
-		for _, filter := range symbol.Filters {
-			switch filter.FilterType {
-			case "PRICE_FILTER":
-				f.MinPrice = filter.MinPrice
-				f.MaxPrice = filter.MaxPrice
-				f.TickSize = filter.TickSize
-			case "LOT_SIZE":
-				f.LotSize = orderbook.LotSize{
-					MinQty:   filter.MinQty,
-					MaxQty:   filter.MaxQty,
-					StepSize: filter.StepSize,
-				}
-			case "MARKET_LOT_SIZE":
-				f.MarketLotSize = orderbook.LotSize{
-					MinQty:   filter.MinQty,
-					MaxQty:   filter.MaxQty,
-					StepSize: filter.StepSize,
-				}
-			case "MIN_NOTIONAL":
-				f.MinNotional = filter.MinNotional
-			default:
-				continue
-			}
-		}
-
-		s := orderbook.Symbol{
-			Pair:           currency.AllSymbols[symbol.Symbol],
-			BasePrecision:  int8(symbol.BaseAssetPrecision),
-			QuotePrecision: int8(symbol.QuoteAssetPrecision),
-			Filter:         f,
-		}
-
-		OrderBook.Add(s)
-	}
-
-	res, err := client.NewTickerBookTickerService().Do(context.Background())
-	if err != nil {
-		return 0, err
-	}
-
-	for _, symbol := range res {
-		if _, ok := currency.AllSymbols[symbol.Symbol]; !ok {
-			continue
-		}
-		book := &orderbook.BookTicker{
-			AskPrice: symbol.AskPrice,
-			AskQty:   symbol.AskQty,
-			BidPrice: symbol.BidPrice,
-			BidQty:   symbol.BidQty,
-			UpdateID: 0,
-		}
-
-		OrderBook.UpdateBookTicker(symbol.Symbol, book)
-		added++
-	}
-
-	return
-}
 
 func ConnectToExchange() {
 	websocketStreamClient := binance.NewWebsocketStreamClient(true)
