@@ -9,6 +9,10 @@ import (
 
 type Balances map[string]*binance.Balance
 
+type OrderResponse struct {
+	price string
+}
+
 func CheckAccountBalance() (Balances, error) {
 	accountService := client.NewGetAccountService()
 	res, err := accountService.Do(context.Background())
@@ -43,6 +47,20 @@ func ConvertAllToUSDC() error {
 	}
 	InfoFmt("%s", binance.PrettyPrint(newOrder))
 	InfoFmt("Sold BTC for USDC")
+
+	return err
+}
+
+func ConvertUSDToBNB(amount float64) error {
+	newOrder, err := client.NewCreateOrderService().Symbol("BNBUSDC").
+		Side("BUY").Type("MARKET").Quantity(amount).
+		Do(context.Background())
+	if err != nil {
+		Error(err)
+		return err
+	}
+	InfoFmt("%s", binance.PrettyPrint(newOrder))
+	InfoFmt("Bought %f BNB for %s USDC", amount, newOrder.(binance.CreateOrderResponseFULL).CummulativeQuoteQty)
 
 	return err
 }

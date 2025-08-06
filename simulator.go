@@ -17,19 +17,19 @@ func Simulate() {
 	// BTC -> TRX -> BNB -> BTC
 
 	t1 := arbitrage.Triangle{
-		PathA: arbitrage.Path{
+		PathA: &arbitrage.Path{
 			Pair:      currency.DOT_BTC,
 			Direction: "BUY",
 			Ask:       OrderBook.Symbols["DOTBTC"].BookTicker.AskPrice,
 			Bid:       OrderBook.Symbols["DOTBTC"].BookTicker.BidPrice,
 		},
-		PathB: arbitrage.Path{
+		PathB: &arbitrage.Path{
 			Pair:      currency.DOT_BNB,
 			Direction: "SELL",
 			Ask:       OrderBook.Symbols["DOTBNB"].BookTicker.AskPrice,
 			Bid:       OrderBook.Symbols["DOTBNB"].BookTicker.BidPrice,
 		},
-		PathC: arbitrage.Path{
+		PathC: &arbitrage.Path{
 			Pair:      currency.BNB_BTC,
 			Direction: "SELL",
 			Ask:       OrderBook.Symbols["BNBBTC"].BookTicker.AskPrice,
@@ -37,7 +37,7 @@ func Simulate() {
 		},
 	}
 
-	found, profit, err := t1.CheckArbitrage(cfg)
+	found, profit, err := t1.CheckArbitrage(cfg.FeeRate)
 	if err != nil {
 		Error(err)
 	}

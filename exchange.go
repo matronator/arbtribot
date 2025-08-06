@@ -44,7 +44,7 @@ func ConnectToExchange() {
 			OrderBook.UpdateBookTicker(event.Symbol, &bookTicker)
 			InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", Yellow("Updated symbol"), val.Pair.String(), Green(bookTicker.BidPrice), Green(bookTicker.BidQty), Red(bookTicker.AskPrice), Red(bookTicker.AskQty))
 			if event.Symbol == currency.DOT_USDC.String() {
-				triangle.PathA = arbitrage.Path{
+				triangle.PathA = &arbitrage.Path{
 					Pair:      currency.AllSymbols[event.Symbol],
 					Ask:       bookTicker.AskPrice,
 					Bid:       bookTicker.BidPrice,
@@ -52,7 +52,7 @@ func ConnectToExchange() {
 				}
 				sides[0] = 1
 			} else if event.Symbol == currency.DOT_BTC.String() {
-				triangle.PathB = arbitrage.Path{
+				triangle.PathB = &arbitrage.Path{
 					Pair:      currency.AllSymbols[event.Symbol],
 					Ask:       bookTicker.AskPrice,
 					Bid:       bookTicker.BidPrice,
@@ -60,7 +60,7 @@ func ConnectToExchange() {
 				}
 				sides[1] = 1
 			} else if event.Symbol == currency.BTC_USDC.String() {
-				triangle.PathC = arbitrage.Path{
+				triangle.PathC = &arbitrage.Path{
 					Pair:      currency.AllSymbols[event.Symbol],
 					Ask:       bookTicker.AskPrice,
 					Bid:       bookTicker.BidPrice,
@@ -70,7 +70,7 @@ func ConnectToExchange() {
 			}
 
 			if sides[0] == 1 && sides[1] == 1 && sides[2] == 1 {
-				found, profit, err := triangle.CheckArbitrage(cfg)
+				found, profit, err := triangle.CheckArbitrage(cfg.FeeRate)
 				if err != nil {
 					Error(err)
 				}

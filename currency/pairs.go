@@ -15,12 +15,12 @@ func (c Currency) String() string {
 }
 
 type Pair struct {
-	From Currency // Bid
-	To   Currency // Ask
+	Base  Currency // Base asset (THISxxx)
+	Quote Currency // Quote asset (xxxTHAT)
 }
 
 func (p Pair) String() string {
-	return strings.ToUpper(p.From.Symbol + p.To.Symbol)
+	return strings.ToUpper(p.Base.Symbol + p.Quote.Symbol)
 }
 
 var (
@@ -106,31 +106,31 @@ var (
 		NEAR, NEWT, NIL, NTRN, NXPC, PARTI, POL, PORTAL, RESOLV, SAGA, SAHARA, S,
 		SEI, SHELL, SIGN, SOL, SOLV, SOPH, SPK, STO, STX, SUI, SXT, TRX, VET, WCT, XRP, XVS}
 
-	DOT_USDC = Pair{From: DOT, To: USDC}
-	BNB_USDC = Pair{From: BNB, To: USDC}
-	BTC_USDC = Pair{From: BTC, To: USDC}
-	ETH_USDC = Pair{From: ETH, To: USDC}
-	LTC_USDC = Pair{From: LTC, To: USDC}
+	DOT_USDC = Pair{Base: DOT, Quote: USDC}
+	BNB_USDC = Pair{Base: BNB, Quote: USDC}
+	BTC_USDC = Pair{Base: BTC, Quote: USDC}
+	ETH_USDC = Pair{Base: ETH, Quote: USDC}
+	LTC_USDC = Pair{Base: LTC, Quote: USDC}
 
-	ADA_BTC = Pair{From: ADA, To: BTC}
-	LTC_BTC = Pair{From: LTC, To: BTC}
-	BNB_BTC = Pair{From: BNB, To: BTC}
-	DOT_BTC = Pair{From: DOT, To: BTC}
-	ETH_BTC = Pair{From: ETH, To: BTC}
-	XRP_BTC = Pair{From: XRP, To: BTC}
-	TRX_BTC = Pair{From: TRX, To: BTC}
+	ADA_BTC = Pair{Base: ADA, Quote: BTC}
+	LTC_BTC = Pair{Base: LTC, Quote: BTC}
+	BNB_BTC = Pair{Base: BNB, Quote: BTC}
+	DOT_BTC = Pair{Base: DOT, Quote: BTC}
+	ETH_BTC = Pair{Base: ETH, Quote: BTC}
+	XRP_BTC = Pair{Base: XRP, Quote: BTC}
+	TRX_BTC = Pair{Base: TRX, Quote: BTC}
 
-	ADA_BNB = Pair{From: ADA, To: BNB}
-	LTC_BNB = Pair{From: LTC, To: BNB}
-	DOT_BNB = Pair{From: DOT, To: BNB}
-	XRP_BNB = Pair{From: XRP, To: BNB}
-	TRX_BNB = Pair{From: TRX, To: BNB}
+	ADA_BNB = Pair{Base: ADA, Quote: BNB}
+	LTC_BNB = Pair{Base: LTC, Quote: BNB}
+	DOT_BNB = Pair{Base: DOT, Quote: BNB}
+	XRP_BNB = Pair{Base: XRP, Quote: BNB}
+	TRX_BNB = Pair{Base: TRX, Quote: BNB}
 
-	ADA_ETH = Pair{From: ADA, To: ETH}
-	BNB_ETH = Pair{From: BNB, To: ETH}
-	DOT_ETH = Pair{From: DOT, To: ETH}
-	XRP_ETH = Pair{From: XRP, To: ETH}
-	LTC_ETH = Pair{From: LTC, To: ETH}
+	ADA_ETH = Pair{Base: ADA, Quote: ETH}
+	BNB_ETH = Pair{Base: BNB, Quote: ETH}
+	DOT_ETH = Pair{Base: DOT, Quote: ETH}
+	XRP_ETH = Pair{Base: XRP, Quote: ETH}
+	LTC_ETH = Pair{Base: LTC, Quote: ETH}
 )
 
 var AllSymbols map[string]Pair = make(map[string]Pair)
@@ -158,7 +158,7 @@ func FillPairs() {
 				continue
 			}
 
-			pair := Pair{From: Currency{Symbol: from}, To: base}
+			pair := Pair{Base: Currency{Symbol: from}, Quote: base}
 			AllSymbols[symbol] = pair
 
 			switch base.Symbol {

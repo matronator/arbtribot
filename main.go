@@ -4,6 +4,7 @@ import (
 	"arbitrage/currency"
 	"arbitrage/orderbook"
 	"arbitrage/utils"
+	"os/exec"
 
 	binance "github.com/binance/binance-connector-go"
 	"github.com/rs/zerolog/log"
@@ -14,6 +15,12 @@ var cfg *utils.Config
 var client *binance.Client
 
 func main() {
+	cmd := exec.Command("scripts/populator")
+	if err := cmd.Run(); err != nil {
+		Error(err)
+		WarningFmt("There was an error running the populator. Some pairs might be outdated.")
+	}
+
 	cfg = utils.LoadConfig()
 	SetUpLogger()
 	log.Info().
@@ -46,6 +53,16 @@ func main() {
 		return
 	}
 	InfoFmt("OrderBook filled with %d symbols.", added)
+
+	triangles := OrderBook.FindTriangles(cfg.FeeRate)
+	for _, triangle := range triangles {
+		found, profit, err := triangle.CheckArbitrage(cfg.FeeRate)
+		if err != nil {
+			Error(err)
+			continue
+		}
+		InfoFmt("Found: %t - %s - PROFIT: %g%%", found, triangle, profit)
+	}
 
 	if !cfg.SimulationMode {
 		AccountBalances, err = CheckAccountBalance()

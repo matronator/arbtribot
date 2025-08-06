@@ -18,11 +18,11 @@ func main() {
 
 	// defer db.Close()
 
-	file, err := os.OpenFile("pairs.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
+	// file, err := os.OpenFile("pairs.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer file.Close()
 
 	ethFile, err := os.OpenFile("pairs_eth.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -30,23 +30,29 @@ func main() {
 	}
 	defer ethFile.Close()
 
-	btcFile, err := os.OpenFile("pairs_btc.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		panic(err)
-	}
-	defer btcFile.Close()
+	// btcFile, err := os.OpenFile("pairs_btc.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer btcFile.Close()
 
-	usdcFile, err := os.OpenFile("pairs_usdc.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		panic(err)
-	}
-	defer usdcFile.Close()
+	// usdcFile, err := os.OpenFile("pairs_usdc.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer usdcFile.Close()
 
-	bnbFile, err := os.OpenFile("pairs_bnb.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		panic(err)
-	}
-	defer bnbFile.Close()
+	// bnbFile, err := os.OpenFile("pairs_bnb.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer bnbFile.Close()
+
+	// eurFile, err := os.OpenFile("pairs_eur.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer eurFile.Close()
 
 	err = godotenv.Load(".env")
 	if err != nil {
@@ -55,6 +61,17 @@ func main() {
 
 	apiKey := os.Getenv("BINANCE_API_KEY")
 	apiSecret := os.Getenv("BINANCE_SECRET_KEY")
+	baseCoins := strings.Split(os.Getenv("BASE_ASSETS"), ",")
+	files := make(map[string]*os.File, len(baseCoins))
+
+	for _, asset := range baseCoins {
+		file, err := os.OpenFile("pairs_"+strings.ToLower(asset)+".txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			panic(err)
+		}
+		files[asset] = file
+		defer file.Close()
+	}
 
 	// coins := currency.Currencies
 	tickersRes, err := GetTickers(apiKey, apiSecret)
@@ -66,32 +83,16 @@ func main() {
 	// tickers := make([]string, 0, len(tickersRes))
 	for _, ticker := range tickersRes.Symbols {
 		// tickers = append(tickers, ticker.Symbol)
-		if (ticker.Status != "TRADING") {
+		if ticker.Status != "TRADING" {
 			continue
 		}
-		if (strings.HasSuffix(ticker.Symbol, "ETH")) {
-			_, err := ethFile.WriteString(ticker.Symbol + "\n")
-			if err != nil {
-				fmt.Println("Error writing to file:", err)
-				continue
-			}
-		} else if (strings.HasSuffix(ticker.Symbol, "BTC")) {
-			_, err := btcFile.WriteString(ticker.Symbol + "\n")
-			if err != nil {
-				fmt.Println("Error writing to file:", err)
-				continue
-			}
-		} else if (strings.HasSuffix(ticker.Symbol, "USDC")) {
-			_, err := usdcFile.WriteString(ticker.Symbol + "\n")
-			if err != nil {
-				fmt.Println("Error writing to file:", err)
-				continue
-			}
-		} else if (strings.HasSuffix(ticker.Symbol, "BNB")) {
-			_, err := bnbFile.WriteString(ticker.Symbol + "\n")
-			if err != nil {
-				fmt.Println("Error writing to file:", err)
-				continue
+		for _, coin := range baseCoins {
+			if strings.HasSuffix(ticker.Symbol, coin) {
+				_, err := files[coin].WriteString(ticker.Symbol + "\n")
+				if err != nil {
+					fmt.Println("Error writing to file:", err)
+					continue
+				}
 			}
 		}
 	}

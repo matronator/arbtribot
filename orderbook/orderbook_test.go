@@ -10,7 +10,7 @@ import (
 
 func TestUpdateBookTicker(t *testing.T) {
 	ob := New()
-	ob.Add(Symbol{
+	ob.Add(&Symbol{
 		Pair: currency.BNB_USDC,
 	})
 	ob.UpdateBookTicker("bnbusdc", &BookTicker{
@@ -51,7 +51,7 @@ func TestUSDPrices(t *testing.T) {
 			continue
 		}
 
-		from := ob.Symbols[symbol].Pair.From
+		from := ob.Symbols[symbol].Pair.Base
 		usdcPair := ob.Symbols[from.String()+"USDC"]
 
 		fmt.Printf("Symbol: %s -> Calculated: %s = Real: %s\n", symbol, price, usdcPair.BookTicker.AskPrice)

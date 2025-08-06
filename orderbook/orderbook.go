@@ -1,10 +1,12 @@
 package orderbook
 
 import (
+	"arbitrage/arbitrage"
 	"arbitrage/currency"
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -12,25 +14,7 @@ import (
 )
 
 type Orderbook struct {
-	Symbols map[string]Symbol
-}
-
-func New() *Orderbook {
-	symbols := make(map[string]Symbol)
-	return &Orderbook{Symbols: symbols}
-}
-
-func (ob *Orderbook) Add(s Symbol) {
-	ob.Symbols[s.Pair.String()] = s
-}
-
-func (ob *Orderbook) UpdateBookTicker(key string, book *BookTicker) (updated bool, err error) {
-	if val, ok := ob.Symbols[key]; ok {
-		val.BookTicker = book
-		ob.Symbols[key] = val
-		return true, err
-	}
-	return false, fmt.Errorf("key %s doesn't exist on map Orderbook.Symbols", key)
+	Symbols map[string]*Symbol
 }
 
 type Symbol struct {
@@ -40,6 +24,7 @@ type Symbol struct {
 	Filter         ExchangeFilter
 	BookTicker     *BookTicker
 	LastUpdated    time.Time
+	Paths          []*arbitrage.Path
 }
 
 type ExchangeFilter struct {
@@ -65,9 +50,129 @@ type BookTicker struct {
 	UpdateID int64
 }
 
-func (s *Symbol) UpdateSymbol(book BookTicker) {
+func New() *Orderbook {
+	symbols := make(map[string]*Symbol)
+	return &Orderbook{Symbols: symbols}
+}
+
+func (ob *Orderbook) Add(s *Symbol) {
+	ob.Symbols[s.Pair.String()] = s
+}
+
+func (ob *Orderbook) UpdateBookTicker(key string, book *BookTicker) (updated bool, err error) {
+	if val, ok := ob.Symbols[key]; ok {
+		val.BookTicker = book
+		for _, path := range val.Paths {
+			path.Ask = book.AskPrice
+			path.Bid = book.BidPrice
+		}
+		// ob.Symbols[key] = val
+		return true, err
+	}
+	return false, fmt.Errorf("key %s doesn't exist on map Orderbook.Symbols", key)
+}
+
+func (ob *Orderbook) FindTriangles(fee float64) []*arbitrage.Triangle {
+	var path1, path2, path3 *arbitrage.Path
+	var start, middle, end *Symbol
+	triangles := make([]*arbitrage.Triangle, 0)
+
+	for symbol, pair := range currency.USDCSymbols {
+		coin := pair.Base
+		path1 = &arbitrage.Path{
+			Pair:      *pair,
+			Ask:       ob.Symbols[symbol].BookTicker.AskPrice,
+			Bid:       ob.Symbols[symbol].BookTicker.BidPrice,
+			Direction: "BUY",
+		}
+		start = ob.Symbols[symbol]
+
+		if slices.Contains([]currency.Currency{currency.BTC, currency.ETH, currency.BNB}, coin) {
+			var coins map[string]*currency.Pair
+			switch coin {
+			case currency.BTC:
+				coins = currency.BTCSymbols
+			case currency.ETH:
+				coins = currency.ETHSymbols
+			case currency.BNB:
+			default:
+				coins = currency.BNBSymbols
+			}
+
+			for s, p := range coins {
+				c := p.Base
+				last := c.String() + "USDC"
+				if v, ok := currency.USDCSymbols[last]; ok {
+					path2 = &arbitrage.Path{
+						Pair:      *p,
+						Ask:       ob.Symbols[s].BookTicker.AskPrice,
+						Bid:       ob.Symbols[s].BookTicker.BidPrice,
+						Direction: "BUY",
+					}
+					middle = ob.Symbols[s]
+
+					path3 = &arbitrage.Path{
+						Pair:      *v,
+						Ask:       ob.Symbols[last].BookTicker.AskPrice,
+						Bid:       ob.Symbols[last].BookTicker.BidPrice,
+						Direction: "SELL",
+					}
+					end = ob.Symbols[last]
+
+					triangle := arbitrage.Triangle{PathA: path1, PathB: path2, PathC: path3}
+					triangles = append(triangles, &triangle)
+
+					start.Paths = append(start.Paths, path1)
+					middle.Paths = append(middle.Paths, path2)
+					end.Paths = append(end.Paths, path3)
+				}
+			}
+		} else {
+			for _, base := range currency.BaseCurrencies {
+				if base == currency.USDC {
+					continue
+				}
+
+				if val, ok := ob.Symbols[coin.String()+base.String()]; ok {
+					path2 = &arbitrage.Path{
+						Pair:      val.Pair,
+						Ask:       val.BookTicker.AskPrice,
+						Bid:       val.BookTicker.BidPrice,
+						Direction: "SELL",
+					}
+					middle = val
+
+					if last, ok := ob.Symbols[base.String()+"USDC"]; ok {
+						path3 = &arbitrage.Path{
+							Pair:      last.Pair,
+							Ask:       last.BookTicker.AskPrice,
+							Bid:       last.BookTicker.BidPrice,
+							Direction: "SELL",
+						}
+						end = last
+
+						triangle := arbitrage.Triangle{PathA: path1, PathB: path2, PathC: path3}
+						triangles = append(triangles, &triangle)
+
+						start.Paths = append(start.Paths, path1)
+						middle.Paths = append(middle.Paths, path2)
+						end.Paths = append(end.Paths, path3)
+					}
+				}
+			}
+		}
+	}
+
+	return triangles
+}
+
+func (s *Symbol) UpdateSymbolTicker(book *BookTicker) {
 	s.LastUpdated = time.Now()
-	s.BookTicker = &book
+	s.BookTicker = book
+	for _, path := range s.Paths {
+		path.Ask = book.AskPrice
+		path.Bid = book.BidPrice
+	}
 }
 
 func FillOrderBook(client *binance.Client) (ob *Orderbook, err error) {
@@ -117,7 +222,7 @@ func FillOrderBook(client *binance.Client) (ob *Orderbook, err error) {
 			Filter:         f,
 		}
 
-		ob.Add(s)
+		ob.Add(&s)
 	}
 
 	return ob, nil
@@ -151,7 +256,7 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 
 		ob.UpdateBookTicker(symbol.Symbol, book)
 		pair := ob.Symbols[symbol.Symbol]
-		fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n", symbol.Symbol, pair.Pair.From, pair.Pair.To, pair.BasePrecision, pair.QuotePrecision, pair.Filter.TickSize, pair.Filter.LotSize.StepSize, pair.Filter.LotSize.MinQty, pair.Filter.LotSize.MaxQty, pair.Filter.MinNotional, book.AskPrice, book.BidPrice, pair.LastUpdated.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n", symbol.Symbol, pair.Pair.Base, pair.Pair.Quote, pair.BasePrecision, pair.QuotePrecision, pair.Filter.TickSize, pair.Filter.LotSize.StepSize, pair.Filter.LotSize.MinQty, pair.Filter.LotSize.MaxQty, pair.Filter.MinNotional, book.AskPrice, book.BidPrice, pair.LastUpdated.Format("2006-01-02 15:04:05"))
 		added++
 	}
 
@@ -159,11 +264,11 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 }
 
 func (s *Symbol) GetUSDPrice(ob *Orderbook) (string, error) {
-	if s.Pair.To.String() == "USDC" {
+	if s.Pair.Quote.String() == "USDC" {
 		return s.BookTicker.AskPrice, nil
 	}
 
-	c := s.Pair.From.String()
+	c := s.Pair.Base.String()
 	symbol := c + "USDC"
 	if val, ok := ob.Symbols[symbol]; ok {
 		return val.BookTicker.AskPrice, nil
