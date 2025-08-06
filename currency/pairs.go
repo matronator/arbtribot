@@ -27,9 +27,10 @@ var (
 	USDC = Currency{Symbol: "USDC"}
 	BTC  = Currency{Symbol: "BTC"}
 	ETH  = Currency{Symbol: "ETH"}
+	EUR  = Currency{Symbol: "EUR"}
 	BNB  = Currency{Symbol: "BNB"}
 
-	BaseCurrencies = [4]Currency{USDC, BTC, ETH, BNB}
+	BaseCurrencies = [5]Currency{USDC, BTC, ETH, BNB, EUR}
 
 	ADA    = Currency{Symbol: "ADA"}
 	AI     = Currency{Symbol: "AI"}
@@ -138,6 +139,7 @@ var BTCSymbols map[string]*Pair = make(map[string]*Pair)
 var USDCSymbols map[string]*Pair = make(map[string]*Pair)
 var BNBSymbols map[string]*Pair = make(map[string]*Pair)
 var ETHSymbols map[string]*Pair = make(map[string]*Pair)
+var EURSymbols map[string]*Pair = make(map[string]*Pair)
 
 func FillPairs() {
 	if len(AllSymbols) > 0 {
@@ -170,6 +172,8 @@ func FillPairs() {
 				BNBSymbols[symbol] = &pair
 			case "ETH":
 				ETHSymbols[symbol] = &pair
+			case "EUR":
+				EURSymbols[symbol] = &pair
 			}
 		}
 	}

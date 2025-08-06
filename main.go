@@ -29,6 +29,8 @@ func main() {
 		Str("API_KEY", "***").
 		Str("API_SECRET", "***").
 		Float64("FEE_RATE", cfg.FeeRate).
+		Str("START_ASSET", cfg.StartAsset).
+		Strs("BASE_ASSETS", cfg.BaseAssets).
 		Msg("Bot started with config from .env file")
 	if cfg.SimulationMode {
 		InfoFmt("MODE: %s %s", Green("SIMULATION"), Italic(Dim("(no real trades will be placed, only logs)")))

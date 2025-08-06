@@ -87,7 +87,7 @@ func (ob *Orderbook) FindTriangles(fee float64) []*arbitrage.Triangle {
 		}
 		start = ob.Symbols[symbol]
 
-		if slices.Contains([]currency.Currency{currency.BTC, currency.ETH, currency.BNB}, coin) {
+		if slices.Contains([]currency.Currency{currency.BTC, currency.ETH, currency.BNB, currency.EUR}, coin) {
 			var coins map[string]*currency.Pair
 			switch coin {
 			case currency.BTC:
@@ -95,8 +95,10 @@ func (ob *Orderbook) FindTriangles(fee float64) []*arbitrage.Triangle {
 			case currency.ETH:
 				coins = currency.ETHSymbols
 			case currency.BNB:
-			default:
 				coins = currency.BNBSymbols
+			case currency.EUR:
+			default:
+				coins = currency.EURSymbols
 			}
 
 			for s, p := range coins {

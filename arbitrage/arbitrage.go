@@ -34,7 +34,7 @@ func (t *Triangle) String() string {
 		end = t.PathC.Pair.Base
 	}
 
-	return fmt.Sprintf("%4s -> %-7s -> %-7s -> %4s", start, middle, end, start)
+	return fmt.Sprintf("%s -> %s -> %s -> %s", start, middle, end, start)
 }
 
 type Path struct {

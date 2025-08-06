@@ -3,17 +3,20 @@ package utils
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
 )
 
 type Config struct {
-	SimulationMode bool    // true = simulate, false = live trading
-	APIKey         string  // Binance API Key (for live trading)
-	APISecret      string  // Binance API Secret (for live trading)
-	FeeRate        float64 // Binance spot trading fee rate (default 0.001 = 0.1%)
-	DebugMode      bool    // Enable debug logging
+	SimulationMode bool     // true = simulate, false = live trading
+	APIKey         string   // Binance API Key (for live trading)
+	APISecret      string   // Binance API Secret (for live trading)
+	FeeRate        float64  // Binance spot trading fee rate (default 0.001 = 0.1%)
+	DebugMode      bool     // Enable debug logging
+	StartAsset     string   // Starting currency
+	BaseAssets     []string // Base currencies
 }
 
 func LoadConfig() *Config {
@@ -26,6 +29,8 @@ func LoadConfig() *Config {
 			APISecret:      "",
 			FeeRate:        0.001, // 0.1% fee = 0.001
 			DebugMode:      false, // Default to false, can be set via env
+			StartAsset:     "USDC",
+			BaseAssets:     []string{"USDC", "BTC", "BNB", "ETH"},
 		}
 	}
 
@@ -41,5 +46,7 @@ func LoadConfig() *Config {
 		APISecret:      os.Getenv("BINANCE_SECRET_KEY"),
 		FeeRate:        fee,
 		DebugMode:      os.Getenv("DEBUG_MODE") == "true",
+		StartAsset:     os.Getenv("START_ASSET"),
+		BaseAssets:     strings.Split(os.Getenv("BASE_ASSETS"), ","),
 	}
 }
