@@ -3,7 +3,6 @@ package main
 import (
 	"arbitrage/arbitrage"
 	"arbitrage/currency"
-	"arbitrage/orderbook"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -20,7 +19,7 @@ func Test() {
 	defer client.Close()
 }
 
-var OrderBook *orderbook.Orderbook
+var OrderBook *arbitrage.Orderbook
 
 func ConnectToExchange() {
 	websocketStreamClient := binance.NewWebsocketStreamClient(true)
@@ -29,7 +28,7 @@ func ConnectToExchange() {
 	sides := []uint8{0, 0, 0}
 
 	wsBookTickerHandler := func(event *binance.WsBookTickerEvent) {
-		bookTicker := orderbook.BookTicker{
+		bookTicker := arbitrage.BookTicker{
 			AskPrice: event.BestAskPrice,
 			AskQty:   event.BestAskQty,
 			BidPrice: event.BestBidPrice,

@@ -2,8 +2,11 @@ package arbitrage
 
 import (
 	"arbitrage/currency"
+	"context"
 	"fmt"
+	"strconv"
 
+	binance "github.com/binance/binance-connector-go"
 	"github.com/quagmt/udecimal"
 	"github.com/rs/zerolog/log"
 )
@@ -34,7 +37,7 @@ func (t *Triangle) String() string {
 		end = t.PathC.Pair.Base
 	}
 
-	return fmt.Sprintf("%s -> %s -> %s -> %s", start, middle, end, start)
+	return fmt.Sprintf("[%s -> %s -> %s] %s -> %s -> %s -> %s", t.PathA.Pair.String(), t.PathB.Pair.String(), t.PathC.Pair.String(), start, middle, end, start)
 }
 
 type Path struct {
@@ -124,6 +127,121 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 	}
 
 	profit = product.InexactFloat64()
+
+	return
+}
+
+func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount float64) error {
+	// First trade (USDC -> first coin)
+	s := ob.Symbols[t.PathA.Pair.String()]
+	res, err := t.PathA.Execute(client, *s, usdAmount)
+	if err != nil {
+		return err
+	}
+
+	// Second trade (first coin -> second coin)
+	// Use ExecutedQty instead of CummulativeQuoteQty for more accuracy
+	amountB, err := strconv.ParseFloat(res.ExecutedQty, 64)
+	if err != nil {
+		return err
+	}
+	resB, err := t.PathB.Execute(client, *ob.Symbols[t.PathB.Pair.String()], amountB)
+	if err != nil {
+		return err
+	}
+
+	// Final trade (second coin -> USDC)
+	amountC, err := strconv.ParseFloat(resB.ExecutedQty, 64)
+	if err != nil {
+		return err
+	}
+	resC, err := t.PathC.Execute(client, *ob.Symbols[t.PathC.Pair.String()], amountC)
+	if err != nil {
+		return err
+	}
+
+	log.Info().Msgf("Triangle %s executed!", t.String())
+	log.Info().Msg(binance.PrettyPrint(resC))
+
+	return nil
+}
+
+func (p *Path) Execute(client *binance.Client, symbol Symbol, amount float64) (res *binance.CreateOrderResponseFULL, err error) {
+	var priceString string
+	var quantity udecimal.Decimal
+
+	if p.Direction == "BUY" {
+		priceString = p.Ask
+		// For BUY orders: quantity = amount / price
+		price, err := udecimal.Parse(priceString)
+		if err != nil {
+			return nil, err
+		}
+		quantity, err = udecimal.MustFromFloat64(amount).Div(price)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		priceString = p.Bid
+		// For SELL orders: quantity = amount (we're selling the amount we have)
+		quantity = udecimal.MustFromFloat64(amount)
+	}
+
+	stepSize, err := udecimal.Parse(symbol.Filter.LotSize.StepSize)
+	if err != nil {
+		return nil, err
+	}
+
+	minQty, err := udecimal.Parse(symbol.Filter.LotSize.MinQty)
+	if err != nil {
+		return nil, err
+	}
+
+	// Round quantity down to nearest step size
+	lots, err := quantity.Div(stepSize)
+	if err != nil {
+		return nil, err
+	}
+	lots = lots.Trunc(0)
+	newQty := lots.Mul(stepSize)
+
+	// Check minimum quantity
+	if newQty.Cmp(minQty) < 0 {
+		return nil, fmt.Errorf("quantity %s is smaller than minimum %s", newQty, minQty)
+	}
+
+	// Check minimum notional value
+	minNotional, err := udecimal.Parse(symbol.Filter.MinNotional)
+	if err != nil {
+		return nil, err
+	}
+
+	price, err := udecimal.Parse(priceString)
+	if err != nil {
+		return nil, err
+	}
+
+	notional := price.Mul(newQty)
+	if minNotional.Cmp(notional) > 0 {
+		return nil, fmt.Errorf("order notional %s is smaller than %s", notional, minNotional)
+	}
+
+	// Convert to float with proper precision
+	qty, err := strconv.ParseFloat(newQty.StringFixed(uint8(symbol.BasePrecision)), 64)
+	if err != nil {
+		return nil, err
+	}
+
+	order, err := client.NewCreateOrderService().Symbol(symbol.Pair.String()).
+		Quantity(qty).Type("MARKET").Side(p.Direction).Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	res = order.(*binance.CreateOrderResponseFULL)
+
+	log.Info().Msgf("Order for %s placed. %s %g %s for %s %s",
+		symbol.Pair.String(), p.Direction, qty, symbol.Pair.Base, res.Price, symbol.Pair.Quote)
+	log.Info().Msg(binance.PrettyPrint(res))
 
 	return
 }

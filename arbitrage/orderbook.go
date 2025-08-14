@@ -1,12 +1,11 @@
-package orderbook
+package arbitrage
 
 import (
-	"arbitrage/arbitrage"
 	"arbitrage/currency"
 	"context"
 	"fmt"
 	"os"
-	"slices"
+	"sync"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -24,7 +23,7 @@ type Symbol struct {
 	Filter         ExchangeFilter
 	BookTicker     *BookTicker
 	LastUpdated    time.Time
-	Paths          []*arbitrage.Path
+	Paths          []*Path
 }
 
 type ExchangeFilter struct {
@@ -66,105 +65,131 @@ func (ob *Orderbook) UpdateBookTicker(key string, book *BookTicker) (updated boo
 			path.Ask = book.AskPrice
 			path.Bid = book.BidPrice
 		}
-		// ob.Symbols[key] = val
+
 		return true, err
 	}
 	return false, fmt.Errorf("key %s doesn't exist on map Orderbook.Symbols", key)
 }
 
-func (ob *Orderbook) FindTriangles(fee float64) []*arbitrage.Triangle {
-	var path1, path2, path3 *arbitrage.Path
-	var start, middle, end *Symbol
-	triangles := make([]*arbitrage.Triangle, 0)
+func (ob *Orderbook) FindTriangles(fee float64) []*Triangle {
+	var triangles []*Triangle
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
-	for symbol, pair := range currency.USDCSymbols {
-		coin := pair.Base
-		path1 = &arbitrage.Path{
-			Pair:      *pair,
-			Ask:       ob.Symbols[symbol].BookTicker.AskPrice,
-			Bid:       ob.Symbols[symbol].BookTicker.BidPrice,
-			Direction: "BUY",
+	for startSymbol, startPair := range ob.Symbols {
+		// Only consider pairs involving USDC
+		if startPair.Pair.Base != currency.USDC && startPair.Pair.Quote != currency.USDC {
+			continue
 		}
-		start = ob.Symbols[symbol]
 
-		if slices.Contains([]currency.Currency{currency.BTC, currency.ETH, currency.BNB, currency.EUR}, coin) {
-			var coins map[string]*currency.Pair
-			switch coin {
-			case currency.BTC:
-				coins = currency.BTCSymbols
-			case currency.ETH:
-				coins = currency.ETHSymbols
-			case currency.BNB:
-				coins = currency.BNBSymbols
-			case currency.EUR:
-			default:
-				coins = currency.EURSymbols
-			}
+		wg.Add(1)
 
-			for s, p := range coins {
-				c := p.Base
-				last := c.String() + "USDC"
-				if v, ok := currency.USDCSymbols[last]; ok {
-					path2 = &arbitrage.Path{
-						Pair:      *p,
-						Ask:       ob.Symbols[s].BookTicker.AskPrice,
-						Bid:       ob.Symbols[s].BookTicker.BidPrice,
-						Direction: "BUY",
-					}
-					middle = ob.Symbols[s]
+		go func(startSymbol string, startPair *Symbol) {
+			defer wg.Done()
 
-					path3 = &arbitrage.Path{
-						Pair:      *v,
-						Ask:       ob.Symbols[last].BookTicker.AskPrice,
-						Bid:       ob.Symbols[last].BookTicker.BidPrice,
-						Direction: "SELL",
-					}
-					end = ob.Symbols[last]
+			var path1 *Path
+			var firstCoin currency.Currency
 
-					triangle := arbitrage.Triangle{PathA: path1, PathB: path2, PathC: path3}
-					triangles = append(triangles, &triangle)
-
-					start.Paths = append(start.Paths, path1)
-					middle.Paths = append(middle.Paths, path2)
-					end.Paths = append(end.Paths, path3)
+			if startPair.Pair.Quote == currency.USDC {
+				path1 = &Path{
+					Pair:      startPair.Pair,
+					Ask:       startPair.BookTicker.AskPrice,
+					Bid:       startPair.BookTicker.BidPrice,
+					Direction: "BUY",
 				}
+				firstCoin = startPair.Pair.Base
+			} else {
+				path1 = &Path{
+					Pair:      startPair.Pair,
+					Ask:       startPair.BookTicker.AskPrice,
+					Bid:       startPair.BookTicker.BidPrice,
+					Direction: "SELL",
+				}
+				firstCoin = startPair.Pair.Quote
 			}
-		} else {
-			for _, base := range currency.BaseCurrencies {
-				if base == currency.USDC {
+
+			localTriangles := make([]*Triangle, 0)
+
+			for midSymbol, midPair := range ob.Symbols {
+				if midSymbol == startSymbol {
 					continue
 				}
 
-				if val, ok := ob.Symbols[coin.String()+base.String()]; ok {
-					path2 = &arbitrage.Path{
-						Pair:      val.Pair,
-						Ask:       val.BookTicker.AskPrice,
-						Bid:       val.BookTicker.BidPrice,
+				var path2 *Path
+				var middleCoin currency.Currency
+
+				if midPair.Pair.Base == firstCoin {
+					path2 = &Path{
+						Pair:      midPair.Pair,
+						Ask:       midPair.BookTicker.AskPrice,
+						Bid:       midPair.BookTicker.BidPrice,
 						Direction: "SELL",
 					}
-					middle = val
+					middleCoin = midPair.Pair.Quote
+				} else if midPair.Pair.Quote == firstCoin {
+					path2 = &Path{
+						Pair:      midPair.Pair,
+						Ask:       midPair.BookTicker.AskPrice,
+						Bid:       midPair.BookTicker.BidPrice,
+						Direction: "BUY",
+					}
+					middleCoin = midPair.Pair.Base
+				} else {
+					continue
+				}
 
-					if last, ok := ob.Symbols[base.String()+"USDC"]; ok {
-						path3 = &arbitrage.Path{
-							Pair:      last.Pair,
-							Ask:       last.BookTicker.AskPrice,
-							Bid:       last.BookTicker.BidPrice,
+				for endSymbol, endPair := range ob.Symbols {
+					if endSymbol == startSymbol || endSymbol == midSymbol {
+						continue
+					}
+
+					if endPair.Pair.Base != currency.USDC && endPair.Pair.Quote != currency.USDC {
+						continue
+					}
+
+					var path3 *Path
+
+					if endPair.Pair.Base == middleCoin && endPair.Pair.Quote == currency.USDC {
+						path3 = &Path{
+							Pair:      endPair.Pair,
+							Ask:       endPair.BookTicker.AskPrice,
+							Bid:       endPair.BookTicker.BidPrice,
 							Direction: "SELL",
 						}
-						end = last
-
-						triangle := arbitrage.Triangle{PathA: path1, PathB: path2, PathC: path3}
-						triangles = append(triangles, &triangle)
-
-						start.Paths = append(start.Paths, path1)
-						middle.Paths = append(middle.Paths, path2)
-						end.Paths = append(end.Paths, path3)
+					} else if endPair.Pair.Quote == middleCoin && endPair.Pair.Base == currency.USDC {
+						path3 = &Path{
+							Pair:      endPair.Pair,
+							Ask:       endPair.BookTicker.AskPrice,
+							Bid:       endPair.BookTicker.BidPrice,
+							Direction: "BUY",
+						}
+					} else {
+						continue
 					}
+
+					triangle := &Triangle{
+						PathA: path1,
+						PathB: path2,
+						PathC: path3,
+					}
+
+					// Optional: Add paths to symbols
+					ob.Symbols[startSymbol].Paths = append(ob.Symbols[startSymbol].Paths, path1)
+					ob.Symbols[midSymbol].Paths = append(ob.Symbols[midSymbol].Paths, path2)
+					ob.Symbols[endSymbol].Paths = append(ob.Symbols[endSymbol].Paths, path3)
+
+					localTriangles = append(localTriangles, triangle)
 				}
 			}
-		}
+
+			// Merge local triangles into global list
+			mu.Lock()
+			triangles = append(triangles, localTriangles...)
+			mu.Unlock()
+		}(startSymbol, startPair)
 	}
 
+	wg.Wait()
 	return triangles
 }
 
@@ -210,7 +235,7 @@ func FillOrderBook(client *binance.Client) (ob *Orderbook, err error) {
 					MaxQty:   filter.MaxQty,
 					StepSize: filter.StepSize,
 				}
-			case "MIN_NOTIONAL":
+			case "NOTIONAL":
 				f.MinNotional = filter.MinNotional
 			default:
 				continue
@@ -260,6 +285,38 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 		pair := ob.Symbols[symbol.Symbol]
 		fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n", symbol.Symbol, pair.Pair.Base, pair.Pair.Quote, pair.BasePrecision, pair.QuotePrecision, pair.Filter.TickSize, pair.Filter.LotSize.StepSize, pair.Filter.LotSize.MinQty, pair.Filter.LotSize.MaxQty, pair.Filter.MinNotional, book.AskPrice, book.BidPrice, pair.LastUpdated.Format("2006-01-02 15:04:05"))
 		added++
+	}
+
+	return
+}
+
+func (ob *Orderbook) UpdatePrices(client *binance.Client) (updated int, err error) {
+	res, err := client.NewTickerBookTickerService().Do(context.Background())
+	if err != nil {
+		return 0, err
+	}
+
+	for _, symbol := range res {
+		if val, ok := ob.Symbols[symbol.Symbol]; ok {
+			if val.BookTicker.AskPrice != symbol.AskPrice || val.BookTicker.BidPrice != symbol.BidPrice {
+				book := &BookTicker{
+					AskPrice: symbol.AskPrice,
+					AskQty:   symbol.AskQty,
+					BidPrice: symbol.BidPrice,
+					BidQty:   symbol.BidQty,
+					UpdateID: val.BookTicker.UpdateID + 1,
+				}
+
+				ob.UpdateBookTicker(symbol.Symbol, book)
+
+				for _, path := range val.Paths {
+					path.Ask = symbol.AskPrice
+					path.Bid = symbol.BidPrice
+				}
+
+				updated++
+			}
+		}
 	}
 
 	return

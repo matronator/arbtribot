@@ -29,8 +29,12 @@ var (
 	ETH  = Currency{Symbol: "ETH"}
 	EUR  = Currency{Symbol: "EUR"}
 	BNB  = Currency{Symbol: "BNB"}
+	TRY  = Currency{Symbol: "TRY"}
+	DOGE = Currency{Symbol: "DOGE"}
+	TRX  = Currency{Symbol: "TRX"}
+	XRP  = Currency{Symbol: "XRP"}
 
-	BaseCurrencies = [5]Currency{USDC, BTC, ETH, BNB, EUR}
+	BaseCurrencies = [7]Currency{USDC, BTC, ETH, BNB, DOGE, TRX, XRP}
 
 	ADA    = Currency{Symbol: "ADA"}
 	AI     = Currency{Symbol: "AI"}
@@ -95,10 +99,8 @@ var (
 	STX    = Currency{Symbol: "STX"}
 	SUI    = Currency{Symbol: "SUI"}
 	SXT    = Currency{Symbol: "SXT"}
-	TRX    = Currency{Symbol: "TRX"}
 	VET    = Currency{Symbol: "VET"}
 	WCT    = Currency{Symbol: "WCT"}
-	XRP    = Currency{Symbol: "XRP"}
 	XVS    = Currency{Symbol: "XVS"}
 
 	Currencies = []Currency{ADA, AI, ALT, ARKM, AVAX, AXS, BABY, BANANA, BB, BERA, BCH, BIO, BMT,
@@ -139,7 +141,9 @@ var BTCSymbols map[string]*Pair = make(map[string]*Pair)
 var USDCSymbols map[string]*Pair = make(map[string]*Pair)
 var BNBSymbols map[string]*Pair = make(map[string]*Pair)
 var ETHSymbols map[string]*Pair = make(map[string]*Pair)
-var EURSymbols map[string]*Pair = make(map[string]*Pair)
+
+// var EURSymbols map[string]*Pair = make(map[string]*Pair)
+// var TRYSymbols map[string]*Pair = make(map[string]*Pair)
 
 func FillPairs() {
 	if len(AllSymbols) > 0 {
@@ -172,8 +176,10 @@ func FillPairs() {
 				BNBSymbols[symbol] = &pair
 			case "ETH":
 				ETHSymbols[symbol] = &pair
-			case "EUR":
-				EURSymbols[symbol] = &pair
+				// case "EUR":
+				// 	EURSymbols[symbol] = &pair
+				// case "TRY":
+				// 	TRYSymbols[symbol] = &pair
 			}
 		}
 	}

@@ -9,10 +9,6 @@ import (
 
 type Balances map[string]*binance.Balance
 
-type OrderResponse struct {
-	price string
-}
-
 func CheckAccountBalance() (Balances, error) {
 	accountService := client.NewGetAccountService()
 	res, err := accountService.Do(context.Background())
@@ -37,16 +33,43 @@ func CheckAccountBalance() (Balances, error) {
 	return balances, err
 }
 
-func ConvertAllToUSDC() error {
-	newOrder, err := client.NewCreateOrderService().Symbol("BTCUSDC").
-		Side("SELL").Type("MARKET").Quantity(0.00017).
+func AllToUSDC() error {
+	balances, err := CheckAccountBalance()
+	if err != nil {
+		return err
+	}
+
+	for s, b := range balances {
+		if s == "BNB" {
+			continue
+		}
+		err := ConvertToUSDC(s, b.Free)
+		if err != nil {
+			Error(err)
+			continue
+		}
+	}
+
+	InfoFmt("%s", Green("All assets changed to USDC"))
+
+	return nil
+}
+
+func ConvertToUSDC(asset string, quantity string) error {
+	q, err := strconv.ParseFloat(quantity, 64)
+	if err != nil {
+		return err
+	}
+
+	newOrder, err := client.NewCreateOrderService().Symbol(asset + "USDC").
+		Side("SELL").Type("MARKET").Quantity(q).
 		Do(context.Background())
 	if err != nil {
 		Error(err)
 		return err
 	}
 	InfoFmt("%s", binance.PrettyPrint(newOrder))
-	InfoFmt("Sold BTC for USDC")
+	InfoFmt("Sold %s for USDC", asset)
 
 	return err
 }
