@@ -62,14 +62,6 @@ func main() {
 	InfoFmt("OrderBook filled with %d symbols.", added)
 
 	triangles := OrderBook.FindTriangles(cfg.FeeRate)
-	// for _, triangle := range triangles {
-	// 	found, profit, err := triangle.CheckArbitrage(cfg.FeeRate)
-	// 	if err != nil {
-	// 		Error(err)
-	// 		continue
-	// 	}
-	// 	InfoFmt("Found: %t - %s - PROFIT: %g%%", found, triangle, profit)
-	// }
 	InfoFmt("%s", Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
 
 	if !cfg.SimulationMode {
@@ -77,17 +69,13 @@ func main() {
 		if err != nil {
 			Error(err)
 		}
-
-		go loop(triangles, OrderBook)
-
-		quitChannel := make(chan os.Signal, 1)
-		signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
-		<-quitChannel
-
-		// ConvertAllToUSDC()
-
-		// ConnectToExchange()
 	}
+
+	go loop(triangles, OrderBook)
+
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+	<-quitChannel
 
 	defer func() {
 		InfoFmt("Bot is shutting down...")
@@ -104,7 +92,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 				Error(err)
 				continue
 			}
-			if found || profit > 0.998 {
+			if found || profit > 1.01 {
 				InfoFmt("%s %s - PROFIT: %g%%", Green("Arbitrage found!"), triangle, profit)
 				opportunities = append(opportunities, triangle)
 			}
@@ -116,18 +104,21 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 			InfoFmt("%s", Green(fmt.Sprintf("%d opportunities found this cycle!", len(opportunities))))
 		}
 
-		count := 0
+		if !cfg.SimulationMode {
+			count := 0
 
-		for _, t := range opportunities {
-			if count < 5 {
-				err := t.Execute(client, ob, 10)
-				if err != nil {
-					Error(err)
-					continue
+			for _, t := range opportunities {
+				if count < 5 {
+					err := t.Execute(client, ob, 10)
+					if err != nil {
+						Error(err)
+						continue
+					}
+					count++
+					InfoFmt("%s", Green(fmt.Sprintf("%s executed!", t.String())))
 				}
-				count++
+				break
 			}
-			break
 		}
 
 		time.Sleep(time.Second * 5)
