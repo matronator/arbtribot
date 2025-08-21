@@ -70,7 +70,7 @@ func main() {
 			Error(err)
 		}
 
-		// ConvertToUSDC("UNI", "1.41")
+		// ConvertToUSDC("BTC", "0.00013")
 	}
 
 	// return
@@ -96,7 +96,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 				Error(err)
 				continue
 			}
-			if found || profit > 1.01005 {
+			if found || profit > 1.0101 {
 				InfoFmt("%s %s - PROFIT: %g%%", Green("Arbitrage found!"), triangle, profit)
 				opportunities = append(opportunities, triangle)
 			}

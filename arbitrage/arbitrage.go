@@ -159,13 +159,16 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 		prevPath = *p
 		prevSymbol = *symbol
 
-		// For the final trade (PathC), always use ExecutedQty
-		// For intermediate trades (PathB), use the ExecutedQty if the next trade is a SELL,
-		// or CummulativeQuoteQty if the next trade is a BUY
-		if i == 0 && paths[1].Direction == "BUY" {
-			currentAmount = response.CummulativeQuoteQty
-		} else {
-			currentAmount = response.ExecutedQty
+		// For PathB to PathC transition, we need to check if the quote asset of PathB
+		// matches the base asset of PathC - if it does, use CummulativeQuoteQty
+		if i == 0 {
+			// If PathB's quote asset matches PathC's base asset, use CummulativeQuoteQty
+			if p.Pair.Quote == paths[1].Pair.Base {
+				currentAmount = response.CummulativeQuoteQty
+			} else {
+				// If PathB's base asset matches PathC's base asset, use ExecutedQty
+				currentAmount = response.ExecutedQty
+			}
 		}
 	}
 

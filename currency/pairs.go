@@ -164,6 +164,10 @@ func FillPairs() {
 				continue
 			}
 
+			if from == "PAXG" {
+				continue
+			}
+
 			pair := Pair{Base: Currency{Symbol: from}, Quote: base}
 			AllSymbols[symbol] = pair
 
