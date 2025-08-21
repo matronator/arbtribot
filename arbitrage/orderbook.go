@@ -2,6 +2,7 @@ package arbitrage
 
 import (
 	"arbitrage/currency"
+	"arbitrage/logger"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	binance "github.com/binance/binance-connector-go"
 	"github.com/quagmt/udecimal"
+	"github.com/rs/zerolog/log"
 )
 
 type Orderbook struct {
@@ -262,7 +264,7 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 	}
 	defer file.Close()
 
-	file.WriteString("Symbol,BASE,QUOTE,basePrecision,quotePrecision,tickSize,stepSize,minQty,maxQty,minNotional,ASK,BID,updatedAt\n")
+	file.WriteString("Symbol,BASE,QUOTE,basePrecision,quotePrecision,tickSize,stepSize,marketStepSize,minQty,marketMinQty,maxQty,marketMaxQty,minNotional,ASK,BID,updatedAt\n")
 
 	res, err := client.NewTickerBookTickerService().Do(context.Background())
 	if err != nil {
@@ -283,7 +285,23 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 
 		ob.UpdateBookTicker(symbol.Symbol, book)
 		pair := ob.Symbols[symbol.Symbol]
-		fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n", symbol.Symbol, pair.Pair.Base, pair.Pair.Quote, pair.BasePrecision, pair.QuotePrecision, pair.Filter.TickSize, pair.Filter.LotSize.StepSize, pair.Filter.LotSize.MinQty, pair.Filter.LotSize.MaxQty, pair.Filter.MinNotional, book.AskPrice, book.BidPrice, pair.LastUpdated.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+			symbol.Symbol,
+			pair.Pair.Base,
+			pair.Pair.Quote,
+			pair.BasePrecision,
+			pair.QuotePrecision,
+			pair.Filter.TickSize,
+			pair.Filter.LotSize.StepSize,
+			pair.Filter.MarketLotSize.StepSize,
+			pair.Filter.LotSize.MinQty,
+			pair.Filter.MarketLotSize.MinQty,
+			pair.Filter.LotSize.MaxQty,
+			pair.Filter.MarketLotSize.MaxQty,
+			pair.Filter.MinNotional,
+			book.AskPrice,
+			book.BidPrice,
+			pair.LastUpdated.Format("2006-01-02 15:04:05"))
 		added++
 	}
 
@@ -320,6 +338,23 @@ func (ob *Orderbook) UpdatePrices(client *binance.Client) (updated int, err erro
 	}
 
 	return
+}
+
+func NewMarketOrder(client *binance.Client, pair *currency.Pair, dir string, qty float64) (*binance.CreateOrderResponseFULL, error) {
+	symbol := pair.String()
+
+	order, err := client.NewCreateOrderService().Symbol(symbol).
+		Quantity(qty).Type("MARKET").Side(dir).Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	res := order.(*binance.CreateOrderResponseFULL)
+
+	log.Info().Msg(binance.PrettyPrint(res))
+	log.Info().Msgf("Order for %s placed. %s %s %s for %s %s", logger.Cyan(symbol), dir, res.ExecutedQty, pair.Base, res.CummulativeQuoteQty, pair.Quote)
+
+	return res, nil
 }
 
 func (s *Symbol) GetUSDPrice(ob *Orderbook) (string, error) {

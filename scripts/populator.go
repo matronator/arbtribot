@@ -86,6 +86,9 @@ func main() {
 		if ticker.Status != "TRADING" {
 			continue
 		}
+		if strings.Contains(ticker.Symbol, "PAXG") {
+			continue
+		}
 		for _, coin := range baseCoins {
 			if strings.HasSuffix(ticker.Symbol, coin) {
 				_, err := files[coin].WriteString(ticker.Symbol + "\n")

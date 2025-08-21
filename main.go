@@ -69,7 +69,11 @@ func main() {
 		if err != nil {
 			Error(err)
 		}
+
+		// ConvertToUSDC("UNI", "1.41")
 	}
+
+	// return
 
 	go loop(triangles, OrderBook)
 
@@ -92,7 +96,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 				Error(err)
 				continue
 			}
-			if found || profit > 1.01 {
+			if found || profit > 1.01005 {
 				InfoFmt("%s %s - PROFIT: %g%%", Green("Arbitrage found!"), triangle, profit)
 				opportunities = append(opportunities, triangle)
 			}
@@ -104,20 +108,29 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 			InfoFmt("%s", Green(fmt.Sprintf("%d opportunities found this cycle!", len(opportunities))))
 		}
 
+		executed := false
 		if !cfg.SimulationMode {
 			count := 0
 
 			for _, t := range opportunities {
 				if count < 5 {
-					err := t.Execute(client, ob, 10)
+					err := t.Execute(client, ob, 15)
 					if err != nil {
 						Error(err)
 						continue
 					}
+					executed = true
 					count++
-					InfoFmt("%s", Green(fmt.Sprintf("%s executed!", t.String())))
 				}
 				break
+			}
+		}
+
+		if executed {
+			var err error
+			AccountBalances, err = CheckAccountBalance()
+			if err != nil {
+				Error(err)
 			}
 		}
 

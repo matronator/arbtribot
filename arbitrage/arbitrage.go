@@ -2,7 +2,7 @@ package arbitrage
 
 import (
 	"arbitrage/currency"
-	"context"
+	"arbitrage/logger"
 	"fmt"
 	"strconv"
 
@@ -134,41 +134,50 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount float64) error {
 	// First trade (USDC -> first coin)
 	s := ob.Symbols[t.PathA.Pair.String()]
-	res, err := t.PathA.Execute(client, *s, usdAmount)
+	underMaxQty, err := checkMarketLotSize(s, t.PathA, usdAmount)
+	if err != nil || !underMaxQty {
+		// rollback order
+		log.Warn().Msgf("First path of triangle %s has quantity %g larger than MARKET_LOT_SIZE maxQuantity. Discarding triangle.", s.Pair, usdAmount)
+		return err
+	}
+
+	res, err := t.PathA.Execute(client, s, usdAmount)
 	if err != nil {
 		return err
 	}
 
-	// Second trade (first coin -> second coin)
-	// Use ExecutedQty instead of CummulativeQuoteQty for more accuracy
-	amountB, err := strconv.ParseFloat(res.ExecutedQty, 64)
-	if err != nil {
-		return err
-	}
-	resB, err := t.PathB.Execute(client, *ob.Symbols[t.PathB.Pair.String()], amountB)
-	if err != nil {
-		return err
+	prevPath := *t.PathA
+	prevSymbol := *s
+	paths := [2]*Path{t.PathB, t.PathC}
+	currentAmount := res.ExecutedQty
+	for i, p := range paths {
+		symbol := ob.Symbols[p.Pair.String()]
+		response, err := executePath(client, &prevSymbol, &prevPath, symbol, p, currentAmount)
+		if err != nil {
+			return err
+		}
+		prevPath = *p
+		prevSymbol = *symbol
+
+		// For the final trade (PathC), always use ExecutedQty
+		// For intermediate trades (PathB), use the ExecutedQty if the next trade is a SELL,
+		// or CummulativeQuoteQty if the next trade is a BUY
+		if i == 0 && paths[1].Direction == "BUY" {
+			currentAmount = response.CummulativeQuoteQty
+		} else {
+			currentAmount = response.ExecutedQty
+		}
 	}
 
-	// Final trade (second coin -> USDC)
-	amountC, err := strconv.ParseFloat(resB.ExecutedQty, 64)
-	if err != nil {
-		return err
-	}
-	resC, err := t.PathC.Execute(client, *ob.Symbols[t.PathC.Pair.String()], amountC)
-	if err != nil {
-		return err
-	}
-
-	log.Info().Msgf("Triangle %s executed!", t.String())
-	log.Info().Msg(binance.PrettyPrint(resC))
+	log.Info().Msgf("%s", logger.Green("Triangle "+t.String()+" executed!"))
 
 	return nil
 }
 
-func (p *Path) Execute(client *binance.Client, symbol Symbol, amount float64) (res *binance.CreateOrderResponseFULL, err error) {
+func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (res *binance.CreateOrderResponseFULL, err error) {
 	var priceString string
 	var quantity udecimal.Decimal
+	var logAmount float64
 
 	if p.Direction == "BUY" {
 		priceString = p.Ask
@@ -181,11 +190,15 @@ func (p *Path) Execute(client *binance.Client, symbol Symbol, amount float64) (r
 		if err != nil {
 			return nil, err
 		}
+		logAmount = amount
 	} else {
 		priceString = p.Bid
-		// For SELL orders: quantity = amount (we're selling the amount we have)
 		quantity = udecimal.MustFromFloat64(amount)
+		logAmount = quantity.Mul(udecimal.MustParse(priceString)).InexactFloat64()
 	}
+
+	log.Info().Str("symbol", symbol.Pair.String()).Float64("amount", amount).
+		Msgf("%sing %s %s for %g %s", p.Direction, quantity, logger.Cyan(p.Pair.Base.String()), logAmount, logger.Cyan(p.Pair.Quote.String()))
 
 	stepSize, err := udecimal.Parse(symbol.Filter.LotSize.StepSize)
 	if err != nil {
@@ -197,7 +210,6 @@ func (p *Path) Execute(client *binance.Client, symbol Symbol, amount float64) (r
 		return nil, err
 	}
 
-	// Round quantity down to nearest step size
 	lots, err := quantity.Div(stepSize)
 	if err != nil {
 		return nil, err
@@ -210,7 +222,6 @@ func (p *Path) Execute(client *binance.Client, symbol Symbol, amount float64) (r
 		return nil, fmt.Errorf("quantity %s is smaller than minimum %s", newQty, minQty)
 	}
 
-	// Check minimum notional value
 	minNotional, err := udecimal.Parse(symbol.Filter.MinNotional)
 	if err != nil {
 		return nil, err
@@ -226,24 +237,84 @@ func (p *Path) Execute(client *binance.Client, symbol Symbol, amount float64) (r
 		return nil, fmt.Errorf("order notional %s is smaller than %s", notional, minNotional)
 	}
 
-	// Convert to float with proper precision
 	qty, err := strconv.ParseFloat(newQty.StringFixed(uint8(symbol.BasePrecision)), 64)
 	if err != nil {
 		return nil, err
 	}
 
-	order, err := client.NewCreateOrderService().Symbol(symbol.Pair.String()).
-		Quantity(qty).Type("MARKET").Side(p.Direction).Do(context.Background())
+	res, err = NewMarketOrder(client, &symbol.Pair, p.Direction, qty)
+
+	return
+}
+
+func executePath(client *binance.Client, prevSymbol *Symbol, prevPath *Path, symbol *Symbol, path *Path, amount string) (*binance.CreateOrderResponseFULL, error) {
+	// Second trade (first coin -> second coin)
+	prevAmount, err := strconv.ParseFloat(amount, 64)
 	if err != nil {
 		return nil, err
 	}
-	res = order.(*binance.CreateOrderResponseFULL)
+	underMaxQty, err := checkMarketLotSize(symbol, path, prevAmount)
+	if err != nil || !underMaxQty {
+		// rollback order
+		var realAmountStr string
+		var realAmount udecimal.Decimal
+		if path.Direction == "BUY" {
+			amB := udecimal.MustFromFloat64(prevAmount)
+			bid := udecimal.MustParse(path.Bid)
+			realAmount, err = amB.Div(bid)
+			if err != nil {
+				return nil, err
+			}
+			realAmountStr = realAmount.String()
+		}
+		log.Warn().Msgf("Path of triangle %s has quantity %s larger than MARKET_LOT_SIZE maxQuantity. Rolling back executed trades and discarding triangle.", symbol.Pair, realAmountStr)
+		var dir string
+		if prevPath.Direction == "BUY" {
+			dir = "SELL"
+		} else {
+			dir = "BUY"
+		}
+		NewMarketOrder(client, &prevSymbol.Pair, dir, prevAmount)
+		return nil, err
+	}
 
-	log.Info().Msgf("Order for %s placed. %s %g %s for %s %s",
-		symbol.Pair.String(), p.Direction, qty, symbol.Pair.Base, res.Price, symbol.Pair.Quote)
-	log.Info().Msg(binance.PrettyPrint(res))
+	response, err := path.Execute(client, symbol, prevAmount)
+	if err != nil {
+		return nil, err
+	}
 
-	return
+	return response, nil
+}
+
+func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
+	marketMaxQty, err := udecimal.Parse(s.Filter.MarketLotSize.MaxQty)
+	if err != nil {
+		return false, err
+	}
+
+	quantity, err := udecimal.NewFromFloat64(qty)
+	if err != nil {
+		return false, err
+	}
+
+	if p.Direction == "BUY" {
+		priceString := p.Ask
+		price, err := udecimal.Parse(priceString)
+		if err != nil {
+			return false, err
+		}
+
+		quantity, err = quantity.Div(price)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	if quantity.Cmp(marketMaxQty) >= 1 {
+		return false, fmt.Errorf("quantity %s is larger than MARKET_LOT_SIZE maxQuantity %s", quantity, marketMaxQty)
+	}
+
+	return true, nil
 }
 
 func TestArbitrage() Triangle {
