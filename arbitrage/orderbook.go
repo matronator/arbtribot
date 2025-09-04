@@ -1,8 +1,8 @@
 package arbitrage
 
 import (
-	"arbitrage/currency"
-	"arbitrage/logger"
+	"arbtribot/currency"
+	"arbtribot/logger"
 	"context"
 	"fmt"
 	"os"

@@ -3,3 +3,4 @@ Icon?
 .env
 keys.go
 log/
+*.pem

@@ -1,4 +1,4 @@
-module arbitrage
+module arbtribot
 
 go 1.24
 

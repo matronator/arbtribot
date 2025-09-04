@@ -1,9 +1,9 @@
 package main
 
 import (
-	"arbitrage/arbitrage"
-	"arbitrage/currency"
-	"arbitrage/utils"
+	"arbtribot/arbitrage"
+	"arbtribot/currency"
+	"arbtribot/utils"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,6 +64,12 @@ func main() {
 	triangles := OrderBook.FindTriangles(cfg.FeeRate)
 	InfoFmt("%s", Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
 
+	if !cfg.WdEnabled {
+		ErrorFmt("%s", Red("[Binance error] Enable withdrawals for this token to continue with the current action."))
+		WarningFmt("%s", Yellow("Starting on August 25th tokens will be required to have withdrawal permission in order to trade all USDC or USDT pairs."))
+		return
+	}
+
 	if !cfg.SimulationMode {
 		AccountBalances, err = CheckAccountBalance()
 		if err != nil {
@@ -96,7 +102,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 				Error(err)
 				continue
 			}
-			if found || profit > 1.0101 {
+			if found || profit > 1.0105 {
 				InfoFmt("%s %s - PROFIT: %g%%", Green("Arbitrage found!"), triangle, profit)
 				opportunities = append(opportunities, triangle)
 			}
@@ -134,7 +140,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 			}
 		}
 
-		time.Sleep(time.Second * 5)
+		time.Sleep(time.Second * 10)
 		updated, err := ob.UpdatePrices(client)
 		if err != nil {
 			Error(err)

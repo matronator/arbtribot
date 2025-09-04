@@ -17,6 +17,7 @@ type Config struct {
 	DebugMode      bool     // Enable debug logging
 	StartAsset     string   // Starting currency
 	BaseAssets     []string // Base currencies
+	WdEnabled      bool
 }
 
 func LoadConfig() *Config {
@@ -31,6 +32,7 @@ func LoadConfig() *Config {
 			DebugMode:      false, // Default to false, can be set via env
 			StartAsset:     "USDC",
 			BaseAssets:     []string{"USDC", "BTC", "BNB", "ETH"},
+			WdEnabled:      false,
 		}
 	}
 
@@ -48,5 +50,6 @@ func LoadConfig() *Config {
 		DebugMode:      os.Getenv("DEBUG_MODE") == "true",
 		StartAsset:     os.Getenv("START_ASSET"),
 		BaseAssets:     strings.Split(os.Getenv("BASE_ASSETS"), ","),
+		WdEnabled:      os.Getenv("WD_ENABLED") == "true",
 	}
 }

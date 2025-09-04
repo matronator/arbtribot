@@ -1,7 +1,7 @@
 package arbitrage
 
 import (
-	"arbitrage/currency"
+	"arbtribot/currency"
 	"fmt"
 	"testing"
 

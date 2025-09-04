@@ -1,8 +1,8 @@
 package main
 
 import (
-	"arbitrage/arbitrage"
-	"arbitrage/currency"
+	"arbtribot/arbitrage"
+	"arbtribot/currency"
 	"context"
 	"strconv"
 

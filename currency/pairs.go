@@ -1,7 +1,7 @@
 package currency
 
 import (
-	"arbitrage/utils"
+	"arbtribot/utils"
 	"fmt"
 	"strings"
 )
