@@ -75,11 +75,7 @@ func main() {
 		if err != nil {
 			Error(err)
 		}
-
-		// ConvertToUSDC("BTC", "0.00013")
 	}
-
-	// return
 
 	go loop(triangles, OrderBook)
 
