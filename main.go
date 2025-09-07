@@ -3,6 +3,7 @@ package main
 import (
 	"arbtribot/arbitrage"
 	"arbtribot/currency"
+	"arbtribot/logger"
 	"arbtribot/utils"
 	"fmt"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -17,16 +19,18 @@ var AccountBalances Balances
 var cfg *utils.Config
 var client *binance.Client
 var OrderBook *arbitrage.Orderbook
+var SimTradeLogger zerolog.Logger
 
 func main() {
 	cmd := exec.Command("scripts/populator")
 	if err := cmd.Run(); err != nil {
-		Error(err)
-		WarningFmt("There was an error running the populator. Some pairs might be outdated.")
+		logger.Error(err)
+		logger.WarningFmt("There was an error running the populator. Some pairs might be outdated.")
 	}
 
 	cfg = utils.LoadConfig()
 	SetUpLogger()
+	SimTradeLogger = logger.NewSimTradeWriter()
 	log.Info().
 		Bool("SIMULATION_MODE", cfg.SimulationMode).
 		Bool("DEBUG_MODE", cfg.DebugMode).
@@ -38,42 +42,42 @@ func main() {
 		Strs("BASE_ASSETS", cfg.BaseAssets).
 		Msg("Bot started with config from .env file")
 	if cfg.SimulationMode {
-		InfoFmt("MODE: %s %s", Green("SIMULATION"), Italic(Dim("(no real trades will be placed, only logs)")))
+		logger.InfoFmt("MODE: %s %s", logger.Green("SIMULATION"), logger.Italic(logger.Dim("(no real trades will be placed, only logs)")))
 	} else {
-		InfoFmt("MODE: %s %s", Yellow("LIVE TRADING"), Italic(BgYellow("(real trades will be placed)")))
+		logger.InfoFmt("MODE: %s %s", logger.Yellow("LIVE TRADING"), logger.Italic(logger.BgYellow("(real trades will be placed)")))
 	}
 
 	client = binance.NewClient(cfg.APIKey, cfg.APISecret)
 
 	currency.FillPairs()
 
-	OrderBook, err := arbitrage.FillOrderBook(client, cfg)
+	OrderBook, err := arbitrage.FillOrderBook(client, cfg, &SimTradeLogger)
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
 
 	added, err := OrderBook.FillPrices(client)
 	if err != nil {
-		Error(err)
-		ErrorFmt("OrderBook not filled. Added %d symbols", added)
+		logger.Error(err)
+		logger.ErrorFmt("OrderBook not filled. Added %d symbols", added)
 		return
 	}
-	InfoFmt("OrderBook filled with %d symbols.", added)
+	logger.InfoFmt("OrderBook filled with %d symbols.", added)
 
 	triangles := OrderBook.FindTriangles(cfg.FeeRate)
-	InfoFmt("%s", Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
+	logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
 
 	if !cfg.WdEnabled {
-		ErrorFmt("%s", Red("[Binance error] Enable withdrawals for this token to continue with the current action."))
-		WarningFmt("%s", Yellow("Starting on August 25th tokens will be required to have withdrawal permission in order to trade all USDC or USDT pairs."))
+		logger.ErrorFmt("%s", logger.Red("[Binance error] Enable withdrawals for this token to continue with the current action."))
+		logger.WarningFmt("%s", logger.Yellow("Starting on August 25th tokens will be required to have withdrawal permission in order to trade all USDC or USDT pairs."))
 		return
 	}
 
 	if !cfg.SimulationMode {
 		AccountBalances, err = CheckAccountBalance()
 		if err != nil {
-			Error(err)
+			logger.Error(err)
 		}
 	}
 
@@ -107,8 +111,8 @@ func main() {
 	// <-quitChannel
 
 	defer func() {
-		InfoFmt("Bot is shutting down...")
-		InfoFmt("See you next time! %s", Blue("Arbtribot ended..."))
+		logger.InfoFmt("Bot is shutting down...")
+		logger.InfoFmt("See you next time! %s", logger.Blue("Arbtribot ended..."))
 	}()
 }
 
@@ -118,19 +122,19 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 		for _, triangle := range triangles {
 			found, profit, err := triangle.CheckArbitrage(cfg.FeeRate)
 			if err != nil {
-				Error(err)
+				logger.Error(err)
 				continue
 			}
 			if found || profit > 1.0105 {
-				InfoFmt("%s %s - PROFIT: %g%%", Green("Arbitrage found!"), triangle, profit)
+				logger.InfoFmt("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), triangle, profit)
 				opportunities = append(opportunities, triangle)
 			}
 		}
 
 		if len(opportunities) <= 0 {
-			InfoFmt("%s", Dim("No opportunities found this cycle."))
+			logger.InfoFmt("%s", logger.Dim("No opportunities found this cycle."))
 		} else {
-			InfoFmt("%s", Green(fmt.Sprintf("%d opportunities found this cycle!", len(opportunities))))
+			logger.InfoFmt("%s", logger.Green(fmt.Sprintf("%d opportunities found this cycle!", len(opportunities))))
 		}
 
 		executed := false
@@ -139,9 +143,13 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 
 			for _, t := range opportunities {
 				if count < 5 {
-					err := t.Execute(client, ob, cfg.OrderUSDCAmount)
+					locked, err := t.Execute(client, ob, cfg.OrderUSDCAmount)
 					if err != nil {
-						Error(err)
+						logger.Error(err)
+						continue
+					}
+					if locked {
+						logger.WarningFmt("Triangle %s LOCKED from trading.", t.String())
 						continue
 					}
 					executed = true
@@ -155,16 +163,16 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 			var err error
 			AccountBalances, err = CheckAccountBalance()
 			if err != nil {
-				Error(err)
+				logger.Error(err)
 			}
 		}
 
 		time.Sleep(time.Second * 10)
 		updated, err := ob.UpdatePrices(client)
 		if err != nil {
-			Error(err)
+			logger.Error(err)
 			continue
 		}
-		InfoFmt("Updated %d symbols.", updated)
+		logger.InfoFmt("Updated %d symbols.", updated)
 	}
 }

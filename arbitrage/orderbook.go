@@ -13,13 +13,15 @@ import (
 
 	binance "github.com/binance/binance-connector-go"
 	"github.com/quagmt/udecimal"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
 type Orderbook struct {
-	Symbols map[string]*Symbol
-	Config  *utils.Config
-	Client  *binance.Client
+	Symbols     map[string]*Symbol
+	Config      *utils.Config
+	Client      *binance.Client
+	TradeLogger *zerolog.Logger
 }
 
 type Symbol struct {
@@ -55,11 +57,11 @@ type BookTicker struct {
 	UpdateID int64
 }
 
-var OrderBookMutex sync.Mutex
+// var OrderBookMutex sync.Mutex
 
-func New(cfg *utils.Config, client *binance.Client) *Orderbook {
+func New(cfg *utils.Config, client *binance.Client, tradeLogger *zerolog.Logger) *Orderbook {
 	symbols := make(map[string]*Symbol)
-	return &Orderbook{Symbols: symbols, Config: cfg, Client: client}
+	return &Orderbook{Symbols: symbols, Config: cfg, Client: client, TradeLogger: tradeLogger}
 }
 
 func (ob *Orderbook) Add(s *Symbol) {
@@ -106,6 +108,10 @@ func updateTriangle(t *Triangle, path string, book *BookTicker, ob *Orderbook) (
 		t.PathC.Bid = book.BidPrice
 	}
 
+	if t.Locked {
+		return true, nil
+	}
+
 	found, profit, err := t.CheckArbitrage(ob.Config.FeeRate)
 	if err != nil {
 		return true, err
@@ -114,12 +120,29 @@ func updateTriangle(t *Triangle, path string, book *BookTicker, ob *Orderbook) (
 	if found || profit > 1 {
 		log.Info().Msgf("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
 		if !ob.Config.SimulationMode {
-			err := t.Execute(ob.Client, ob, ob.Config.OrderUSDCAmount)
+			locked, err := t.Execute(ob.Client, ob, ob.Config.OrderUSDCAmount)
 			if err != nil {
+				return true, err
+			}
+			if locked {
+				log.Warn().Msgf("Triangle %s LOCKED from executing trades.", t.String())
 				return true, err
 			}
 		} else {
 			log.Info().Str("triangle", t.String()).Msgf("%s", logger.Yellow("Would execute triangle if in LIVE mode."))
+			ob.TradeLogger.Info().
+				Str("triangle", t.String()).
+				Float64("profit", profit).
+				Msgf("Executed triangle %s for profit %g", t.String(), profit)
+
+			// Lock the triangle to simulate LIVE mode behavior
+			t.Locked = true
+			logger.InfoFmt("Triangle %s has been %s for 2 seconds.", t.String(), logger.BgYellow("LOCKED"))
+			go func() {
+				time.Sleep(time.Second * 2)
+				t.Locked = false
+				logger.InfoFmt("Triangle %s has been %s.", t.String(), logger.BgGreen("UNLOCKED"))
+			}()
 		}
 	}
 
@@ -265,13 +288,13 @@ func (ob *Orderbook) FindTriangles(fee float64) []*Triangle {
 // 	}
 // }
 
-func FillOrderBook(client *binance.Client, cfg *utils.Config) (ob *Orderbook, err error) {
+func FillOrderBook(client *binance.Client, cfg *utils.Config, tradeLogger *zerolog.Logger) (ob *Orderbook, err error) {
 	info, err := client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		return nil, err
 	}
 
-	ob = New(cfg, client)
+	ob = New(cfg, client, tradeLogger)
 
 	for _, symbol := range info.Symbols {
 		if _, ok := currency.AllSymbols[symbol.Symbol]; !ok {

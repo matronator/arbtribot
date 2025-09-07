@@ -1,6 +1,7 @@
 package main
 
 import (
+	"arbtribot/logger"
 	"context"
 	"strconv"
 
@@ -21,11 +22,11 @@ func CheckAccountBalance() (Balances, error) {
 	for _, balance := range res.Balances {
 		amount, err := strconv.ParseFloat(balance.Free, 32)
 		if err != nil {
-			Error(err)
+			logger.Error(err)
 			continue
 		}
 		if amount > 0 {
-			InfoFmt("Account has %s %s", balance.Free, balance.Asset)
+			logger.InfoFmt("Account has %s %s", balance.Free, balance.Asset)
 			balances[balance.Asset] = &balance
 		}
 	}
@@ -45,12 +46,12 @@ func AllToUSDC() error {
 		}
 		err := ConvertToUSDC(s, b.Free)
 		if err != nil {
-			Error(err)
+			logger.Error(err)
 			continue
 		}
 	}
 
-	InfoFmt("%s", Green("All assets changed to USDC"))
+	logger.InfoFmt("%s", logger.Green("All assets changed to USDC"))
 
 	return nil
 }
@@ -65,11 +66,11 @@ func ConvertToUSDC(asset string, quantity string) error {
 		Side("SELL").Type("MARKET").Quantity(q).
 		Do(context.Background())
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return err
 	}
-	InfoFmt("%s", binance.PrettyPrint(newOrder))
-	InfoFmt("Sold %s for USDC", asset)
+	logger.InfoFmt("%s", binance.PrettyPrint(newOrder))
+	logger.InfoFmt("Sold %s for USDC", asset)
 
 	return err
 }
@@ -84,11 +85,11 @@ func ConvertUSDCToBTC(quantity string) error {
 		Side("BUY").Type("MARKET").QuoteOrderQty(q).
 		Do(context.Background())
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return err
 	}
-	InfoFmt("%s", binance.PrettyPrint(newOrder))
-	InfoFmt("Bought BTC for %s USDC", quantity)
+	logger.InfoFmt("%s", binance.PrettyPrint(newOrder))
+	logger.InfoFmt("Bought BTC for %s USDC", quantity)
 
 	return err
 }
@@ -98,11 +99,11 @@ func ConvertUSDToBNB(amount float64) error {
 		Side("BUY").Type("MARKET").Quantity(amount).
 		Do(context.Background())
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return err
 	}
-	InfoFmt("%s", binance.PrettyPrint(newOrder))
-	InfoFmt("Bought %f BNB for %s USDC", amount, newOrder.(binance.CreateOrderResponseFULL).CummulativeQuoteQty)
+	logger.InfoFmt("%s", binance.PrettyPrint(newOrder))
+	logger.InfoFmt("Bought %f BNB for %s USDC", amount, newOrder.(binance.CreateOrderResponseFULL).CummulativeQuoteQty)
 
 	return err
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"arbtribot/logger"
 	"context"
 	"strconv"
 
@@ -19,8 +20,8 @@ func WithdrawBTC(quantity string) error {
 		return err
 	}
 
-	InfoFmt("%s", binance.PrettyPrint(withdraw))
-	InfoFmt("Withdrew %s BTC from wallet.", quantity)
+	logger.InfoFmt("%s", binance.PrettyPrint(withdraw))
+	logger.InfoFmt("Withdrew %s BTC from wallet.", quantity)
 
 	return err
 }
@@ -28,10 +29,10 @@ func WithdrawBTC(quantity string) error {
 func WithdrawalHistory() error {
 	withdrawHistory, err := client.NewWithdrawHistoryService().Do(context.Background())
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return nil
 	}
-	InfoFmt("%s", binance.PrettyPrint(withdrawHistory))
+	logger.InfoFmt("%s", binance.PrettyPrint(withdrawHistory))
 
 	return err
 }

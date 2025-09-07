@@ -2,6 +2,7 @@ package main
 
 import (
 	"arbtribot/arbitrage"
+	"arbtribot/logger"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +15,7 @@ func Test() {
 
 	err := client.Connect()
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
 	defer client.Close()
@@ -37,32 +38,36 @@ func ConnectToExchange(symbols []string, ob *arbitrage.Orderbook) {
 				return
 			}
 			ob.UpdateBookTicker(event.Symbol, &bookTicker)
-			// InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", Yellow("Updated symbol"), val.Pair.String(), Green(bookTicker.BidPrice), Green(bookTicker.BidQty), Red(bookTicker.AskPrice), Red(bookTicker.AskQty))
+			// logger.InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", logger.Yellow("Updated symbol"), val.Pair.String(), logger.Green(bookTicker.BidPrice), logger.Green(bookTicker.BidQty), logger.Red(bookTicker.AskPrice), logger.Red(bookTicker.AskQty))
 
 			return
 		}
 
-		InfoFmt("Symbol %s not found.", event.Symbol)
+		logger.InfoFmt("Symbol %s not found.", event.Symbol)
 	}
 
 	errHandler := func(err error) {
-		Error(err)
+		logger.Error(err)
 	}
 
-	InfoFmt("Trying to connect to %d symbols", len(symbols))
+	logger.InfoFmt("Trying to connect to %d symbols", len(symbols))
 
 	doneCh, stopCh, err := websocketStreamClient.WsCombinedBookTickerServe(symbols, wsBookTickerHandler, errHandler)
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
+
+	logger.InfoFmt("Connected!")
 
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
 
+	logger.InfoFmt("Listening to websocket updates for symbols: %v", symbols)
+
 	go func() {
 		<-quitChannel
-		InfoFmt("Received interrupt signal. Closing connection...")
+		logger.InfoFmt("Received interrupt signal. Closing connection...")
 		stopCh <- struct{}{} // use stopCh to stop streaming
 	}()
 	<-doneCh
