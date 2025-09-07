@@ -74,6 +74,25 @@ func ConvertToUSDC(asset string, quantity string) error {
 	return err
 }
 
+func ConvertUSDCToBTC(quantity string) error {
+	q, err := strconv.ParseFloat(quantity, 64)
+	if err != nil {
+		return err
+	}
+
+	newOrder, err := client.NewCreateOrderService().Symbol("BTCUSDC").
+		Side("BUY").Type("MARKET").QuoteOrderQty(q).
+		Do(context.Background())
+	if err != nil {
+		Error(err)
+		return err
+	}
+	InfoFmt("%s", binance.PrettyPrint(newOrder))
+	InfoFmt("Bought BTC for %s USDC", quantity)
+
+	return err
+}
+
 func ConvertUSDToBNB(amount float64) error {
 	newOrder, err := client.NewCreateOrderService().Symbol("BNBUSDC").
 		Side("BUY").Type("MARKET").Quantity(amount).

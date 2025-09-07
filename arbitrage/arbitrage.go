@@ -126,7 +126,8 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 		found = true
 	}
 
-	profit = product.InexactFloat64() + 0.0121
+	// profit = product.InexactFloat64() + 0.0121
+	profit = product.InexactFloat64()
 
 	return
 }

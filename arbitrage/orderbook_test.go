@@ -2,6 +2,7 @@ package arbitrage
 
 import (
 	"arbtribot/currency"
+	"arbtribot/utils"
 	"fmt"
 	"testing"
 
@@ -9,7 +10,8 @@ import (
 )
 
 func TestUpdateBookTicker(t *testing.T) {
-	ob := New()
+	client := binance_connector.NewClient("2F7nXbivEVT0OUZtTMW48JP7w5Qwcc6M6t2T5w84hyDL8JnYH166sWQZxmT7YWxe", "Gpm2aYBhkhk71LZ4UYIOy48TWlRXfpPVMD7RAPf1tb1piJgcct5WjJMihPDsn0WR")
+	ob := New(utils.LoadConfig(), client)
 	ob.Add(&Symbol{
 		Pair: currency.BNB_USDC,
 	})
@@ -26,7 +28,7 @@ func TestUpdateBookTicker(t *testing.T) {
 func TestUSDPrices(t *testing.T) {
 	currency.FillPairs()
 	client := binance_connector.NewClient("2F7nXbivEVT0OUZtTMW48JP7w5Qwcc6M6t2T5w84hyDL8JnYH166sWQZxmT7YWxe", "Gpm2aYBhkhk71LZ4UYIOy48TWlRXfpPVMD7RAPf1tb1piJgcct5WjJMihPDsn0WR")
-	ob, err := FillOrderBook(client)
+	ob, err := FillOrderBook(client, utils.LoadConfig())
 	if err != nil {
 		fmt.Println("Error filling orderbook")
 		fmt.Printf("%s\n", err)

@@ -5,10 +5,8 @@ import (
 	"arbtribot/currency"
 	"arbtribot/utils"
 	"fmt"
-	"os"
 	"os/exec"
-	"os/signal"
-	"syscall"
+	"sync"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -18,6 +16,7 @@ import (
 var AccountBalances Balances
 var cfg *utils.Config
 var client *binance.Client
+var OrderBook *arbitrage.Orderbook
 
 func main() {
 	cmd := exec.Command("scripts/populator")
@@ -34,6 +33,7 @@ func main() {
 		Str("API_KEY", "***").
 		Str("API_SECRET", "***").
 		Float64("FEE_RATE", cfg.FeeRate).
+		Float64("ORDER_USDC_AMOUNT", cfg.OrderUSDCAmount).
 		Str("START_ASSET", cfg.StartAsset).
 		Strs("BASE_ASSETS", cfg.BaseAssets).
 		Msg("Bot started with config from .env file")
@@ -47,7 +47,7 @@ func main() {
 
 	currency.FillPairs()
 
-	OrderBook, err := arbitrage.FillOrderBook(client)
+	OrderBook, err := arbitrage.FillOrderBook(client, cfg)
 	if err != nil {
 		Error(err)
 		return
@@ -77,11 +77,34 @@ func main() {
 		}
 	}
 
-	go loop(triangles, OrderBook)
+	symbols := make([]string, 0, len(OrderBook.Symbols))
+	for symbol := range OrderBook.Symbols {
+		symbols = append(symbols, symbol)
+	}
 
-	quitChannel := make(chan os.Signal, 1)
-	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
-	<-quitChannel
+	// chunk := symbols[0:20]
+	// ConnectToExchange(chunk, OrderBook)
+
+	chunkSize := 50
+	var wg sync.WaitGroup
+	for i := 0; i < len(symbols); i += chunkSize {
+		end := min(i+chunkSize, len(symbols))
+
+		chunk := symbols[i:end]
+		wg.Add(1)
+		go func(symbolsChunk []string) {
+			defer wg.Done()
+			ConnectToExchange(symbolsChunk, OrderBook)
+		}(chunk)
+	}
+
+	wg.Wait()
+
+	// go loop(triangles, OrderBook)
+
+	// quitChannel := make(chan os.Signal, 1)
+	// signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+	// <-quitChannel
 
 	defer func() {
 		InfoFmt("Bot is shutting down...")
@@ -116,7 +139,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 
 			for _, t := range opportunities {
 				if count < 5 {
-					err := t.Execute(client, ob, 15)
+					err := t.Execute(client, ob, cfg.OrderUSDCAmount)
 					if err != nil {
 						Error(err)
 						continue
