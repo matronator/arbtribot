@@ -3,6 +3,7 @@ package main
 import (
 	"arbtribot/arbitrage"
 	"arbtribot/currency"
+	"arbtribot/logger"
 	"context"
 	"strconv"
 
@@ -39,21 +40,21 @@ func Simulate() {
 
 	found, profit, err := t1.CheckArbitrage(cfg.FeeRate)
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 	}
 
 	amt, _ := udecimal.MustParse(AccountBalances["BTC"].Free).Div(udecimal.MustParse("5"))
 	qty, err := amt.Div(udecimal.MustParse(OrderBook.Symbols["DOTBTC"].BookTicker.AskPrice))
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 	}
-	InfoFmt("Buying %s DOT with %s BTC", qty, amt)
+	logger.InfoFmt("Buying %s DOT with %s BTC", qty, amt)
 
 	quantity := qty.Trunc(8).InexactFloat64()
 
 	res, err := client.NewExchangeInfoService().Symbol("DOTBTC").Do(context.Background())
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
 
@@ -77,7 +78,7 @@ func Simulate() {
 
 	stepSizeF, err := strconv.ParseFloat(stepSize, 32)
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
 
@@ -86,7 +87,7 @@ func Simulate() {
 
 	newQty := float32(lotsI) * float32(stepSizeF)
 
-	InfoFmt("New Quantity: %f | Min: %s Max: %s", newQty, minQty, maxQty)
+	logger.InfoFmt("New Quantity: %f | Min: %s Max: %s", newQty, minQty, maxQty)
 
 	// newOrder, err := client.NewCreateOrderService().Symbol("BNBBTC").
 	// 	Side("SELL").Type("MARKET").Quantity(0.023).
@@ -95,7 +96,7 @@ func Simulate() {
 	// 	fmt.Println(err)
 	// 	return
 	// }
-	// InfoFmt("%s", binance.PrettyPrint(newOrder))
+	// logger.InfoFmt("%s", binance.PrettyPrint(newOrder))
 
-	InfoFmt("Arbitrage found = %v | profit = %f", found, profit)
+	logger.InfoFmt("Arbitrage found = %v | profit = %f", found, profit)
 }

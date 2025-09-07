@@ -5,6 +5,7 @@ import (
 	"arbtribot/logger"
 	"fmt"
 	"strconv"
+	"time"
 
 	binance "github.com/binance/binance-connector-go"
 	"github.com/quagmt/udecimal"
@@ -12,9 +13,10 @@ import (
 )
 
 type Triangle struct {
-	PathA *Path
-	PathB *Path
-	PathC *Path
+	PathA  *Path
+	PathB  *Path
+	PathC  *Path
+	Locked bool
 }
 
 func (t *Triangle) String() string {
@@ -126,24 +128,29 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 		found = true
 	}
 
-	profit = product.InexactFloat64() + 0.0121
+	// profit = product.InexactFloat64() + 0.0121
+	profit = product.InexactFloat64()
 
 	return
 }
 
-func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount float64) error {
+func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount float64) (bool, error) {
+	if t.Locked {
+		return true, nil
+	}
+
 	// First trade (USDC -> first coin)
 	s := ob.Symbols[t.PathA.Pair.String()]
 	underMaxQty, err := checkMarketLotSize(s, t.PathA, usdAmount)
 	if err != nil || !underMaxQty {
 		// rollback order
 		log.Warn().Msgf("First path of triangle %s has quantity %g larger than MARKET_LOT_SIZE maxQuantity. Discarding triangle.", s.Pair, usdAmount)
-		return err
+		return false, err
 	}
 
 	res, err := t.PathA.Execute(client, s, usdAmount)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	prevPath := *t.PathA
@@ -154,7 +161,7 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 		symbol := ob.Symbols[p.Pair.String()]
 		response, err := executePath(client, &prevSymbol, &prevPath, symbol, p, currentAmount)
 		if err != nil {
-			return err
+			return false, err
 		}
 		prevPath = *p
 		prevSymbol = *symbol
@@ -174,7 +181,16 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 
 	log.Info().Msgf("%s", logger.Green("Triangle "+t.String()+" executed!"))
 
-	return nil
+	// Lock the triangle to prevent rapid trade execution draining the balance
+	t.Locked = true
+	logger.InfoFmt("Triangle %s has been %s for 2 seconds.", t.String(), logger.BgYellow("LOCKED"))
+	go func() {
+		time.Sleep(time.Second * 2)
+		t.Locked = false
+		logger.InfoFmt("Triangle %s has been %s.", t.String(), logger.BgGreen("UNLOCKED"))
+	}()
+
+	return false, nil
 }
 
 func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (res *binance.CreateOrderResponseFULL, err error) {

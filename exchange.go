@@ -2,8 +2,10 @@ package main
 
 import (
 	"arbtribot/arbitrage"
-	"arbtribot/currency"
-	"time"
+	"arbtribot/logger"
+	"os"
+	"os/signal"
+	"syscall"
 
 	binance "github.com/binance/binance-connector-go"
 )
@@ -13,19 +15,14 @@ func Test() {
 
 	err := client.Connect()
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
 	defer client.Close()
 }
 
-var OrderBook *arbitrage.Orderbook
-
-func ConnectToExchange() {
+func ConnectToExchange(symbols []string, ob *arbitrage.Orderbook) {
 	websocketStreamClient := binance.NewWebsocketStreamClient(true)
-
-	triangle := arbitrage.Triangle{}
-	sides := []uint8{0, 0, 0}
 
 	wsBookTickerHandler := func(event *binance.WsBookTickerEvent) {
 		bookTicker := arbitrage.BookTicker{
@@ -36,79 +33,41 @@ func ConnectToExchange() {
 			UpdateID: event.UpdateID,
 		}
 
-		if val, ok := OrderBook.Symbols[event.Symbol]; ok {
+		if val, ok := ob.Symbols[event.Symbol]; ok {
 			if event.BestAskPrice == val.BookTicker.AskPrice && event.BestBidPrice == val.BookTicker.BidPrice {
 				return
 			}
-			OrderBook.UpdateBookTicker(event.Symbol, &bookTicker)
-			InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", Yellow("Updated symbol"), val.Pair.String(), Green(bookTicker.BidPrice), Green(bookTicker.BidQty), Red(bookTicker.AskPrice), Red(bookTicker.AskQty))
-			if event.Symbol == currency.DOT_USDC.String() {
-				triangle.PathA = &arbitrage.Path{
-					Pair:      currency.AllSymbols[event.Symbol],
-					Ask:       bookTicker.AskPrice,
-					Bid:       bookTicker.BidPrice,
-					Direction: "SELL",
-				}
-				sides[0] = 1
-			} else if event.Symbol == currency.DOT_BTC.String() {
-				triangle.PathB = &arbitrage.Path{
-					Pair:      currency.AllSymbols[event.Symbol],
-					Ask:       bookTicker.AskPrice,
-					Bid:       bookTicker.BidPrice,
-					Direction: "BUY",
-				}
-				sides[1] = 1
-			} else if event.Symbol == currency.BTC_USDC.String() {
-				triangle.PathC = &arbitrage.Path{
-					Pair:      currency.AllSymbols[event.Symbol],
-					Ask:       bookTicker.AskPrice,
-					Bid:       bookTicker.BidPrice,
-					Direction: "SELL",
-				}
-				sides[2] = 1
-			}
+			ob.UpdateBookTicker(event.Symbol, &bookTicker)
+			// logger.InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", logger.Yellow("Updated symbol"), val.Pair.String(), logger.Green(bookTicker.BidPrice), logger.Green(bookTicker.BidQty), logger.Red(bookTicker.AskPrice), logger.Red(bookTicker.AskQty))
 
-			if sides[0] == 1 && sides[1] == 1 && sides[2] == 1 {
-				found, profit, err := triangle.CheckArbitrage(cfg.FeeRate)
-				if err != nil {
-					Error(err)
-				}
-				if found {
-					InfoFmt("%s", Green("Arbitrage found!"))
-				}
-				InfoFmt("Arbitrage profit: %f", profit)
-			}
 			return
 		}
 
-		InfoFmt("Symbol %s not found.", event.Symbol)
+		logger.InfoFmt("Symbol %s not found.", event.Symbol)
 	}
+
 	errHandler := func(err error) {
-		Error(err)
+		logger.Error(err)
 	}
 
-	// symbols := make([]string, 0)
-	// i := 0
-	// for k := range currency.AllSymbols {
-	// 	symbols = append(symbols, k)
-	// 	if i > 10 {
-	// 		break;
-	// 	}
-	// 	i++;
-	// }
-
-	coins := arbitrage.TestArbitrage()
-	symbols := []string{coins.PathA.Pair.String(), coins.PathB.Pair.String(), coins.PathC.Pair.String()}
-
-	InfoFmt("Trying to connect to %d symbols", len(symbols))
+	logger.InfoFmt("Trying to connect to %d symbols", len(symbols))
 
 	doneCh, stopCh, err := websocketStreamClient.WsCombinedBookTickerServe(symbols, wsBookTickerHandler, errHandler)
 	if err != nil {
-		Error(err)
+		logger.Error(err)
 		return
 	}
+
+	logger.InfoFmt("Connected!")
+
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	logger.InfoFmt("Listening to websocket updates for symbols: %v", symbols)
+
 	go func() {
-		time.Sleep(120 * time.Second)
+		<-quitChannel
+		logger.InfoFmt("Received interrupt signal. Closing connection...")
 		stopCh <- struct{}{} // use stopCh to stop streaming
 	}()
 	<-doneCh
