@@ -3,6 +3,7 @@ package arbitrage
 import (
 	"arbtribot/currency"
 	"arbtribot/logger"
+	"arbtribot/utils"
 	"fmt"
 	"strconv"
 	"time"
@@ -189,6 +190,12 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 		t.Locked = false
 		logger.InfoFmt("Triangle %s has been %s.", t.String(), logger.BgGreen("UNLOCKED"))
 	}()
+
+	balance, err := utils.CheckUSDCBalance(client)
+	if err != nil {
+		logger.Error(err)
+	}
+	logger.InfoFmt("%s", logger.Blue(fmt.Sprintf("The account has %s USDC", balance.Free)))
 
 	return false, nil
 }

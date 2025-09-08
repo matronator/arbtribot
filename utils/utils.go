@@ -2,9 +2,12 @@ package utils
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+
+	binance "github.com/binance/binance-connector-go"
 )
 
 func ReadLines(path string) ([]string, error) {
@@ -25,4 +28,20 @@ func ReadLines(path string) ([]string, error) {
 func GetRoot() string {
 	_, b, _, _ := runtime.Caller(0)
 	return filepath.Dir(b + "/../../")
+}
+
+func CheckUSDCBalance(client *binance.Client) (*binance.Balance, error) {
+	accountService := client.NewGetAccountService()
+	res, err := accountService.Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	for _, balance := range res.Balances {
+		if balance.Asset == "USDC" {
+			return &balance, err
+		}
+	}
+
+	return nil, err
 }
