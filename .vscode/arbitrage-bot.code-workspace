@@ -2,10 +2,6 @@
 	"folders": [
 		{
 			"path": ".."
-		},
-		{
-			"name": "SSH FS - aws",
-			"uri": "ssh://aws/"
 		}
 	],
 	"settings": {
