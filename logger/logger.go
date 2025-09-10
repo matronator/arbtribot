@@ -31,7 +31,7 @@ func Error(err error) {
 }
 
 func NewSimTradeWriter() zerolog.Logger {
-	return zerolog.New(NewRollingFile("simulated-trades"))
+	return zerolog.New(NewRollingFile("simulated-trades")).With().Timestamp().Logger()
 }
 
 func (a *ANSIStripper) Write(p []byte) (n int, err error) {
