@@ -33,7 +33,7 @@ func ConnectToExchange(symbols []string, ob *arbitrage.Orderbook) {
 			UpdateID: event.UpdateID,
 		}
 
-		if val, ok := ob.Symbols[event.Symbol]; ok {
+		if val, ok := ob.Symbols.Get(event.Symbol); ok {
 			if event.BestAskPrice == val.BookTicker.AskPrice && event.BestBidPrice == val.BookTicker.BidPrice {
 				return
 			}

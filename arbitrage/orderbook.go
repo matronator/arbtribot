@@ -11,13 +11,14 @@ import (
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/quagmt/udecimal"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
 type Orderbook struct {
-	Symbols     map[string]*Symbol
+	Symbols     cmap.ConcurrentMap[string, *Symbol]
 	Config      *utils.Config
 	Client      *binance.Client
 	TradeLogger *zerolog.Logger
@@ -58,16 +59,16 @@ type BookTicker struct {
 }
 
 func New(cfg *utils.Config, client *binance.Client, tradeLogger *zerolog.Logger) *Orderbook {
-	symbols := make(map[string]*Symbol)
+	symbols := cmap.New[*Symbol]()
 	return &Orderbook{Symbols: symbols, Config: cfg, Client: client, TradeLogger: tradeLogger}
 }
 
 func (ob *Orderbook) Add(s *Symbol) {
-	ob.Symbols[s.Pair.String()] = s
+	ob.Symbols.Set(s.Pair.String(), s)
 }
 
 func (ob *Orderbook) UpdateBookTicker(key string, book *BookTicker) (updated bool, err error) {
-	if val, ok := ob.Symbols[key]; ok {
+	if val, ok := ob.Symbols.Get(key); ok {
 		err := val.Update(book, ob)
 		if err != nil {
 			return true, err
@@ -124,7 +125,7 @@ func (s *Symbol) updateTriangles(book *BookTicker, ob *Orderbook) error {
 
 func (s *Symbol) TryExecuteTriangle(t *Triangle, ob *Orderbook) error {
 	if t.OnCooldown {
-		return fmt.Errorf("triangle %s on cooldown", t.String())
+		return nil
 	}
 
 	found, profit, err := t.CheckArbitrage(ob.Config.FeeRate)
@@ -132,7 +133,7 @@ func (s *Symbol) TryExecuteTriangle(t *Triangle, ob *Orderbook) error {
 		return err
 	}
 
-	if found && profit > 1.005 && profit < 1.5 {
+	if found && profit > 1.001 && profit < 1.8 {
 		t.Locked = true
 		t.Lock.L.Lock()
 		defer func() {
@@ -170,7 +171,9 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	for startSymbol, startPair := range ob.Symbols {
+	for item := range ob.Symbols.IterBuffered() {
+		startPair := item.Val
+		startSymbol := item.Key
 		// Only consider pairs involving USDC
 		if startPair.Pair.Base != currency.USDC && startPair.Pair.Quote != currency.USDC {
 			continue
@@ -202,7 +205,10 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 
 			localTriangles := make([]*Triangle, 0)
 
-			for midSymbol, midPair := range ob.Symbols {
+			for midItem := range ob.Symbols.IterBuffered() {
+				midSymbol := midItem.Key
+				midPair := midItem.Val
+
 				if midSymbol == startSymbol {
 					continue
 				}
@@ -228,7 +234,10 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 					continue
 				}
 
-				for endSymbol, endPair := range ob.Symbols {
+				for endItem := range ob.Symbols.IterBuffered() {
+					endSymbol := endItem.Key
+					endPair := endItem.Val
+
 					if endSymbol == startSymbol || endSymbol == midSymbol {
 						continue
 					}
@@ -266,15 +275,15 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 
 					// Optional: Add triangles to symbols
 					mu.Lock()
-					ob.Symbols[startSymbol].Lock.Lock()
-					ob.Symbols[startSymbol].Triangles = append(ob.Symbols[startSymbol].Triangles, triangle)
-					ob.Symbols[startSymbol].Lock.Unlock()
-					ob.Symbols[midSymbol].Lock.Lock()
-					ob.Symbols[midSymbol].Triangles = append(ob.Symbols[midSymbol].Triangles, triangle)
-					ob.Symbols[midSymbol].Lock.Unlock()
-					ob.Symbols[endSymbol].Lock.Lock()
-					ob.Symbols[endSymbol].Triangles = append(ob.Symbols[endSymbol].Triangles, triangle)
-					ob.Symbols[endSymbol].Lock.Unlock()
+					startPair.Lock.Lock()
+					startPair.Triangles = append(startPair.Triangles, triangle)
+					startPair.Lock.Unlock()
+					midPair.Lock.Lock()
+					midPair.Triangles = append(midPair.Triangles, triangle)
+					midPair.Lock.Unlock()
+					endPair.Lock.Lock()
+					endPair.Triangles = append(endPair.Triangles, triangle)
+					endPair.Lock.Unlock()
 					mu.Unlock()
 
 					localTriangles = append(localTriangles, triangle)
@@ -388,7 +397,7 @@ func (ob *Orderbook) FillPrices() (added int, err error) {
 		}
 
 		ob.UpdateBookTicker(symbol.Symbol, book)
-		pair := ob.Symbols[symbol.Symbol]
+		pair, _ := ob.Symbols.Get(symbol.Symbol)
 		fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
 			symbol.Symbol,
 			pair.Pair.Base,
@@ -419,7 +428,7 @@ func (ob *Orderbook) UpdatePrices() (updated int, err error) {
 	}
 
 	for _, symbol := range res {
-		if val, ok := ob.Symbols[symbol.Symbol]; ok {
+		if val, ok := ob.Symbols.Get(symbol.Symbol); ok {
 			if val.BookTicker.AskPrice != symbol.AskPrice || val.BookTicker.BidPrice != symbol.BidPrice {
 				book := &BookTicker{
 					AskPrice: symbol.AskPrice,
@@ -466,7 +475,7 @@ func (s *Symbol) GetUSDPrice(ob *Orderbook) (string, error) {
 
 	c := s.Pair.Base.String()
 	symbol := c + "USDC"
-	if val, ok := ob.Symbols[symbol]; ok {
+	if val, ok := ob.Symbols.Get(symbol); ok {
 		return val.BookTicker.AskPrice, nil
 	}
 
@@ -489,8 +498,9 @@ func (s *Symbol) GetUSDPrice(ob *Orderbook) (string, error) {
 
 func checkSymbol(base string, quote string, ob *Orderbook) (string, error) {
 	symbol := base + quote
-	if val, ok := ob.Symbols[symbol]; ok {
-		quotePriceS := ob.Symbols[quote+"USDC"].BookTicker.AskPrice
+	if val, ok := ob.Symbols.Get(symbol); ok {
+		quoteSymbol, _ := ob.Symbols.Get(quote + "USDC")
+		quotePriceS := quoteSymbol.BookTicker.AskPrice
 		quotePrice, err := udecimal.Parse(quotePriceS)
 		if err != nil {
 			return "", err

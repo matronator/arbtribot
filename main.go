@@ -80,9 +80,9 @@ func main() {
 		return
 	}
 
-	symbols := make([]string, 0, len(OrderBook.Symbols))
-	for symbol := range OrderBook.Symbols {
-		symbols = append(symbols, symbol)
+	symbols := make([]string, 0, OrderBook.Symbols.Count())
+	for symbol := range OrderBook.Symbols.IterBuffered() {
+		symbols = append(symbols, symbol.Key)
 	}
 
 	// chunk := symbols[0:20]

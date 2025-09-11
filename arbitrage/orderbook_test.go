@@ -48,7 +48,7 @@ func TestUSDPrices(t *testing.T) {
 	symbols := []string{"DOTBTC", "ADAETH", "LTCBTC", "XRPBNB", "STXBTC"}
 
 	for _, symbol := range symbols {
-		s := ob.Symbols[symbol]
+		s, _ := ob.Symbols.Get(symbol)
 		price, err := s.GetUSDPrice(ob)
 		if err != nil {
 			fmt.Println("Error converting price")
@@ -56,8 +56,9 @@ func TestUSDPrices(t *testing.T) {
 			continue
 		}
 
-		from := ob.Symbols[symbol].Pair.Base
-		usdcPair := ob.Symbols[from.String()+"USDC"]
+		fromS, _ := ob.Symbols.Get(symbol)
+		from := fromS.Pair.Base
+		usdcPair, _ := ob.Symbols.Get(from.String() + "USDC")
 
 		fmt.Printf("Symbol: %s -> Calculated: %s = Real: %s\n", symbol, price, usdcPair.BookTicker.AskPrice)
 	}

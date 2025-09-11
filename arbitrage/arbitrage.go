@@ -149,7 +149,7 @@ func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, e
 	}
 
 	// First trade (USDC -> first coin)
-	s := ob.Symbols[t.PathA.Pair.String()]
+	s, _ := ob.Symbols.Get(t.PathA.Pair.String())
 	underMaxQty, err := checkMarketLotSize(s, t.PathA, usdAmount)
 	if err != nil || !underMaxQty {
 		// rollback order
@@ -167,7 +167,7 @@ func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, e
 	paths := [2]*Path{t.PathB, t.PathC}
 	currentAmount := res.ExecutedQty
 	for i, p := range paths {
-		symbol := ob.Symbols[p.Pair.String()]
+		symbol, _ := ob.Symbols.Get(p.Pair.String())
 		response, err := executePath(ob.Client, &prevSymbol, &prevPath, symbol, p, currentAmount)
 		if err != nil {
 			return false, err
