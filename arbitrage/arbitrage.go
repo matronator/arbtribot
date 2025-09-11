@@ -6,6 +6,7 @@ import (
 	"arbtribot/utils"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -14,10 +15,12 @@ import (
 )
 
 type Triangle struct {
-	PathA  *Path
-	PathB  *Path
-	PathC  *Path
-	Locked bool
+	PathA      *Path
+	PathB      *Path
+	PathC      *Path
+	OnCooldown bool
+	Locked     bool
+	Lock       *sync.Cond
 }
 
 func (t *Triangle) String() string {
@@ -44,13 +47,18 @@ func (t *Triangle) String() string {
 }
 
 type Path struct {
-	Pair      currency.Pair
-	Ask       string
-	Bid       string
-	Direction string // Buy or sell
+	Pair       currency.Pair
+	BookTicker *BookTicker
+	Direction  string // Buy or sell
 }
 
 func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err error) {
+	t.Lock.L.Lock()
+	defer t.Lock.L.Unlock()
+	if t.Locked {
+		t.Lock.Wait()
+	}
+
 	var priceA, priceB, priceC udecimal.Decimal
 
 	f, err := udecimal.NewFromFloat64(fee)
@@ -61,27 +69,27 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 
 	// Parse prices based on direction
 	if t.PathA.Direction == "SELL" {
-		priceA, err = udecimal.Parse(t.PathA.Bid)
+		priceA, err = udecimal.Parse(t.PathA.BookTicker.BidPrice)
 	} else {
-		priceA, err = udecimal.Parse(t.PathA.Ask)
+		priceA, err = udecimal.Parse(t.PathA.BookTicker.AskPrice)
 	}
 	if err != nil {
 		return false, 0, err
 	}
 
 	if t.PathB.Direction == "SELL" {
-		priceB, err = udecimal.Parse(t.PathB.Bid)
+		priceB, err = udecimal.Parse(t.PathB.BookTicker.BidPrice)
 	} else {
-		priceB, err = udecimal.Parse(t.PathB.Ask)
+		priceB, err = udecimal.Parse(t.PathB.BookTicker.AskPrice)
 	}
 	if err != nil {
 		return false, 0, err
 	}
 
 	if t.PathC.Direction == "SELL" {
-		priceC, err = udecimal.Parse(t.PathC.Bid)
+		priceC, err = udecimal.Parse(t.PathC.BookTicker.BidPrice)
 	} else {
-		priceC, err = udecimal.Parse(t.PathC.Ask)
+		priceC, err = udecimal.Parse(t.PathC.BookTicker.AskPrice)
 	}
 	if err != nil {
 		return false, 0, err
@@ -135,8 +143,8 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 	return
 }
 
-func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount float64) (bool, error) {
-	if t.Locked {
+func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, err error) {
+	if t.OnCooldown {
 		return true, nil
 	}
 
@@ -145,11 +153,11 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 	underMaxQty, err := checkMarketLotSize(s, t.PathA, usdAmount)
 	if err != nil || !underMaxQty {
 		// rollback order
-		log.Warn().Msgf("First path of triangle %s has quantity %g larger than MARKET_LOT_SIZE maxQuantity. Discarding triangle.", s.Pair, usdAmount)
+		logger.WarningFmt("First path of triangle %s has quantity %g larger than MARKET_LOT_SIZE maxQuantity. Discarding triangle.", s.Pair, usdAmount)
 		return false, err
 	}
 
-	res, err := t.PathA.Execute(client, s, usdAmount)
+	res, err := t.PathA.Execute(ob.Client, s, usdAmount)
 	if err != nil {
 		return false, err
 	}
@@ -160,7 +168,7 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 	currentAmount := res.ExecutedQty
 	for i, p := range paths {
 		symbol := ob.Symbols[p.Pair.String()]
-		response, err := executePath(client, &prevSymbol, &prevPath, symbol, p, currentAmount)
+		response, err := executePath(ob.Client, &prevSymbol, &prevPath, symbol, p, currentAmount)
 		if err != nil {
 			return false, err
 		}
@@ -180,18 +188,12 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 		}
 	}
 
-	log.Info().Msgf("%s", logger.Green("Triangle "+t.String()+" executed!"))
+	logger.InfoFmt("%s", logger.Green("Triangle "+t.String()+" executed!"))
 
 	// Lock the triangle to prevent rapid trade execution draining the balance
-	t.Locked = true
-	logger.InfoFmt("Triangle %s has been %s for 2 seconds.", t.String(), logger.BgYellow("LOCKED"))
-	go func() {
-		time.Sleep(time.Second * 2)
-		t.Locked = false
-		logger.InfoFmt("Triangle %s has been %s.", t.String(), logger.BgGreen("UNLOCKED"))
-	}()
+	t.Cooldown(10)
 
-	balance, err := utils.CheckUSDCBalance(client)
+	balance, err := utils.CheckUSDCBalance(ob.Client)
 	if err != nil {
 		logger.Error(err)
 	}
@@ -200,13 +202,27 @@ func (t *Triangle) Execute(client *binance.Client, ob *Orderbook, usdAmount floa
 	return false, nil
 }
 
+func (t *Triangle) Cooldown(seconds int) {
+	if t.OnCooldown {
+		return
+	}
+
+	t.OnCooldown = true
+	logger.InfoFmt("Triangle %s has been %s for %d seconds.", t.String(), logger.BgYellow("LOCKED"), seconds)
+	go func() {
+		time.Sleep(time.Second * time.Duration(seconds))
+		t.OnCooldown = false
+		logger.InfoFmt("Triangle %s has been %s.", t.String(), logger.BgGreen("UNLOCKED"))
+	}()
+}
+
 func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (res *binance.CreateOrderResponseFULL, err error) {
 	var priceString string
 	var quantity udecimal.Decimal
 	var logAmount float64
 
 	if p.Direction == "BUY" {
-		priceString = p.Ask
+		priceString = p.BookTicker.AskPrice
 		// For BUY orders: quantity = amount / price
 		price, err := udecimal.Parse(priceString)
 		if err != nil {
@@ -218,7 +234,7 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 		}
 		logAmount = amount
 	} else {
-		priceString = p.Bid
+		priceString = p.BookTicker.BidPrice
 		quantity = udecimal.MustFromFloat64(amount)
 		logAmount = quantity.Mul(udecimal.MustParse(priceString)).InexactFloat64()
 	}
@@ -286,14 +302,14 @@ func executePath(client *binance.Client, prevSymbol *Symbol, prevPath *Path, sym
 		var realAmount udecimal.Decimal
 		if path.Direction == "BUY" {
 			amB := udecimal.MustFromFloat64(prevAmount)
-			bid := udecimal.MustParse(path.Bid)
+			bid := udecimal.MustParse(path.BookTicker.BidPrice)
 			realAmount, err = amB.Div(bid)
 			if err != nil {
 				return nil, err
 			}
 			realAmountStr = realAmount.String()
 		}
-		log.Warn().Msgf("Path of triangle %s has quantity %s larger than MARKET_LOT_SIZE maxQuantity. Rolling back executed trades and discarding triangle.", symbol.Pair, realAmountStr)
+		logger.WarningFmt("Path of triangle %s has quantity %s larger than MARKET_LOT_SIZE maxQuantity. Rolling back executed trades and discarding triangle.", symbol.Pair, realAmountStr)
 		var dir string
 		if prevPath.Direction == "BUY" {
 			dir = "SELL"
@@ -324,7 +340,7 @@ func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
 	}
 
 	if p.Direction == "BUY" {
-		priceString := p.Ask
+		priceString := p.BookTicker.AskPrice
 		price, err := udecimal.Parse(priceString)
 		if err != nil {
 			return false, err

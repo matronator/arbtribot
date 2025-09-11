@@ -14,8 +14,16 @@ type ANSIStripper struct {
 	writer io.Writer
 }
 
+func Info(msg string) {
+	log.Info().Caller(1).Msg(msg)
+}
+
 func InfoFmt(format string, args ...any) {
 	log.Info().Caller(1).Msgf(format, args...)
+}
+
+func Warning(msg string) {
+	log.Warn().Caller(1).Msg(msg)
 }
 
 func WarningFmt(format string, args ...any) {
@@ -47,7 +55,7 @@ func (a *ANSIStripper) Write(p []byte) (n int, err error) {
 func NewRollingFile(name string) io.Writer {
 	rollingFile := &lumberjack.Logger{
 		Filename:   fmt.Sprintf("log/%s.log", name),
-		MaxSize:    5, // megabytes
+		MaxSize:    10, // megabytes
 		MaxBackups: 5,
 		MaxAge:     30, // days
 		Compress:   false,

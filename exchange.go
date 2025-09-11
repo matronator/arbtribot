@@ -37,7 +37,16 @@ func ConnectToExchange(symbols []string, ob *arbitrage.Orderbook) {
 			if event.BestAskPrice == val.BookTicker.AskPrice && event.BestBidPrice == val.BookTicker.BidPrice {
 				return
 			}
-			ob.UpdateBookTicker(event.Symbol, &bookTicker)
+			updated, err := ob.UpdateBookTicker(event.Symbol, &bookTicker)
+			if err != nil {
+				logger.Error(err)
+			}
+
+			if !updated {
+				logger.WarningFmt("Symbol %s couldn't update book ticker.", val.Pair.String())
+				return
+			}
+
 			// logger.InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", logger.Yellow("Updated symbol"), val.Pair.String(), logger.Green(bookTicker.BidPrice), logger.Green(bookTicker.BidQty), logger.Red(bookTicker.AskPrice), logger.Red(bookTicker.AskQty))
 
 			return

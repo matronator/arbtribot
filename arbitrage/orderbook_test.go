@@ -38,7 +38,7 @@ func TestUSDPrices(t *testing.T) {
 		return
 	}
 
-	_, err = ob.FillPrices(client)
+	_, err = ob.FillPrices()
 	if err != nil {
 		fmt.Println("Error filling prices")
 		fmt.Printf("%s\n", err)

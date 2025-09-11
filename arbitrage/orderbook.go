@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +31,7 @@ type Symbol struct {
 	BookTicker     *BookTicker
 	LastUpdated    time.Time
 	Triangles      []*Triangle
+	Lock           *sync.Mutex
 }
 
 type ExchangeFilter struct {
@@ -57,8 +57,6 @@ type BookTicker struct {
 	UpdateID int64
 }
 
-// var OrderBookMutex sync.Mutex
-
 func New(cfg *utils.Config, client *binance.Client, tradeLogger *zerolog.Logger) *Orderbook {
 	symbols := make(map[string]*Symbol)
 	return &Orderbook{Symbols: symbols, Config: cfg, Client: client, TradeLogger: tradeLogger}
@@ -69,64 +67,88 @@ func (ob *Orderbook) Add(s *Symbol) {
 }
 
 func (ob *Orderbook) UpdateBookTicker(key string, book *BookTicker) (updated bool, err error) {
-	// OrderBookMutex.Lock()
-	// defer OrderBookMutex.Unlock()
 	if val, ok := ob.Symbols[key]; ok {
-		val.BookTicker = book
-		for _, t := range val.Triangles {
-			inTriangle := strings.Contains(t.String(), val.Pair.String())
-			if !inTriangle {
-				continue
-			}
-			paths := map[string]*Path{"A": t.PathA, "B": t.PathB, "C": t.PathC}
-			for key, path := range paths {
-				if path.Pair.String() == val.Pair.String() {
-					updated, err = updateTriangle(t, key, book, ob)
-					if err != nil {
-						return updated, err
-					}
-				}
-			}
+		err := val.Update(book, ob)
+		if err != nil {
+			return true, err
 		}
 
-		return true, err
+		return true, nil
 	}
 	return false, fmt.Errorf("key %s doesn't exist on map Orderbook.Symbols", key)
 }
 
-func updateTriangle(t *Triangle, path string, book *BookTicker, ob *Orderbook) (bool, error) {
-	switch path {
-	case "A":
-		t.PathA.Ask = book.AskPrice
-		t.PathA.Bid = book.BidPrice
-	case "B":
-		t.PathB.Ask = book.AskPrice
-		t.PathB.Bid = book.BidPrice
-	case "C":
-	default:
-		t.PathC.Ask = book.AskPrice
-		t.PathC.Bid = book.BidPrice
+func (s *Symbol) Update(book *BookTicker, ob *Orderbook) error {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+
+	s.BookTicker = book
+	err := s.updateTriangles(book, ob)
+	if err != nil {
+		return err
 	}
 
-	if t.Locked {
-		return true, nil
+	return nil
+}
+
+func (s *Symbol) updateTriangles(book *BookTicker, ob *Orderbook) error {
+	for _, t := range s.Triangles {
+		paths := map[string]*Path{"A": t.PathA, "B": t.PathB, "C": t.PathC}
+		for key, path := range paths {
+			if path.Pair.String() == s.Pair.String() {
+				t.Lock.L.Lock()
+				t.Locked = true
+				switch key {
+				case "A":
+					t.PathA.BookTicker = book
+				case "B":
+					t.PathB.BookTicker = book
+				case "C":
+				default:
+					t.PathC.BookTicker = book
+				}
+				t.Locked = false
+				t.Lock.L.Unlock()
+				t.Lock.Broadcast()
+			}
+		}
+
+		err := s.TryExecuteTriangle(t, ob)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Symbol) TryExecuteTriangle(t *Triangle, ob *Orderbook) error {
+	if t.OnCooldown {
+		return fmt.Errorf("triangle %s on cooldown", t.String())
 	}
 
 	found, profit, err := t.CheckArbitrage(ob.Config.FeeRate)
 	if err != nil {
-		return true, err
+		return err
 	}
-	// 1.0121
-	if found || profit > 1 {
-		log.Info().Msgf("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
+
+	if found && profit > 1.005 && profit < 1.5 {
+		t.Locked = true
+		t.Lock.L.Lock()
+		defer func() {
+			t.Locked = false
+			t.Lock.L.Unlock()
+			t.Lock.Broadcast()
+		}()
+		logger.InfoFmt("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
 		if !ob.Config.SimulationMode {
-			locked, err := t.Execute(ob.Client, ob, ob.Config.OrderUSDCAmount)
+			onCooldown, err := t.Execute(ob, ob.Config.OrderUSDCAmount)
 			if err != nil {
-				return true, err
+				return err
 			}
-			if locked {
-				log.Warn().Msgf("Triangle %s LOCKED from executing trades.", t.String())
-				return true, err
+			if onCooldown {
+				logger.WarningFmt("Triangle %s LOCKED from executing trades.", t.String())
+				return fmt.Errorf("triangle %s on cooldown", t.String())
 			}
 		} else {
 			log.Info().Str("triangle", t.String()).Msgf("%s", logger.Yellow("Would execute triangle if in LIVE mode."))
@@ -136,20 +158,14 @@ func updateTriangle(t *Triangle, path string, book *BookTicker, ob *Orderbook) (
 				Msgf("Executed triangle %s for profit %g", t.String(), profit)
 
 			// Lock the triangle to simulate LIVE mode behavior
-			t.Locked = true
-			logger.InfoFmt("Triangle %s has been %s for 2 seconds.", t.String(), logger.BgYellow("LOCKED"))
-			go func() {
-				time.Sleep(time.Second * 2)
-				t.Locked = false
-				logger.InfoFmt("Triangle %s has been %s.", t.String(), logger.BgGreen("UNLOCKED"))
-			}()
+			t.Cooldown(10)
 		}
 	}
 
-	return true, nil
+	return nil
 }
 
-func (ob *Orderbook) FindTriangles(fee float64) []*Triangle {
+func (ob *Orderbook) FindTriangles() []*Triangle {
 	var triangles []*Triangle
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -170,18 +186,16 @@ func (ob *Orderbook) FindTriangles(fee float64) []*Triangle {
 
 			if startPair.Pair.Quote == currency.USDC {
 				path1 = &Path{
-					Pair:      startPair.Pair,
-					Ask:       startPair.BookTicker.AskPrice,
-					Bid:       startPair.BookTicker.BidPrice,
-					Direction: "BUY",
+					Pair:       startPair.Pair,
+					BookTicker: startPair.BookTicker,
+					Direction:  "BUY",
 				}
 				firstCoin = startPair.Pair.Base
 			} else {
 				path1 = &Path{
-					Pair:      startPair.Pair,
-					Ask:       startPair.BookTicker.AskPrice,
-					Bid:       startPair.BookTicker.BidPrice,
-					Direction: "SELL",
+					Pair:       startPair.Pair,
+					BookTicker: startPair.BookTicker,
+					Direction:  "SELL",
 				}
 				firstCoin = startPair.Pair.Quote
 			}
@@ -198,18 +212,16 @@ func (ob *Orderbook) FindTriangles(fee float64) []*Triangle {
 
 				if midPair.Pair.Base == firstCoin {
 					path2 = &Path{
-						Pair:      midPair.Pair,
-						Ask:       midPair.BookTicker.AskPrice,
-						Bid:       midPair.BookTicker.BidPrice,
-						Direction: "SELL",
+						Pair:       midPair.Pair,
+						BookTicker: midPair.BookTicker,
+						Direction:  "SELL",
 					}
 					middleCoin = midPair.Pair.Quote
 				} else if midPair.Pair.Quote == firstCoin {
 					path2 = &Path{
-						Pair:      midPair.Pair,
-						Ask:       midPair.BookTicker.AskPrice,
-						Bid:       midPair.BookTicker.BidPrice,
-						Direction: "BUY",
+						Pair:       midPair.Pair,
+						BookTicker: midPair.BookTicker,
+						Direction:  "BUY",
 					}
 					middleCoin = midPair.Pair.Base
 				} else {
@@ -229,33 +241,40 @@ func (ob *Orderbook) FindTriangles(fee float64) []*Triangle {
 
 					if endPair.Pair.Base == middleCoin && endPair.Pair.Quote == currency.USDC {
 						path3 = &Path{
-							Pair:      endPair.Pair,
-							Ask:       endPair.BookTicker.AskPrice,
-							Bid:       endPair.BookTicker.BidPrice,
-							Direction: "SELL",
+							Pair:       endPair.Pair,
+							BookTicker: endPair.BookTicker,
+							Direction:  "SELL",
 						}
 					} else if endPair.Pair.Quote == middleCoin && endPair.Pair.Base == currency.USDC {
 						path3 = &Path{
-							Pair:      endPair.Pair,
-							Ask:       endPair.BookTicker.AskPrice,
-							Bid:       endPair.BookTicker.BidPrice,
-							Direction: "BUY",
+							Pair:       endPair.Pair,
+							BookTicker: endPair.BookTicker,
+							Direction:  "BUY",
 						}
 					} else {
 						continue
 					}
 
+					lock := sync.NewCond(&sync.Mutex{})
 					triangle := &Triangle{
-						PathA: path1,
-						PathB: path2,
-						PathC: path3,
+						PathA:      path1,
+						PathB:      path2,
+						PathC:      path3,
+						OnCooldown: false,
+						Lock:       lock,
 					}
 
-					// Optional: Add paths to symbols
+					// Optional: Add triangles to symbols
 					mu.Lock()
+					ob.Symbols[startSymbol].Lock.Lock()
 					ob.Symbols[startSymbol].Triangles = append(ob.Symbols[startSymbol].Triangles, triangle)
+					ob.Symbols[startSymbol].Lock.Unlock()
+					ob.Symbols[midSymbol].Lock.Lock()
 					ob.Symbols[midSymbol].Triangles = append(ob.Symbols[midSymbol].Triangles, triangle)
+					ob.Symbols[midSymbol].Lock.Unlock()
+					ob.Symbols[endSymbol].Lock.Lock()
 					ob.Symbols[endSymbol].Triangles = append(ob.Symbols[endSymbol].Triangles, triangle)
+					ob.Symbols[endSymbol].Lock.Unlock()
 					mu.Unlock()
 
 					localTriangles = append(localTriangles, triangle)
@@ -333,6 +352,7 @@ func FillOrderBook(client *binance.Client, cfg *utils.Config, tradeLogger *zerol
 			BasePrecision:  int8(symbol.BaseAssetPrecision),
 			QuotePrecision: int8(symbol.QuoteAssetPrecision),
 			Filter:         f,
+			Lock:           &sync.Mutex{},
 		}
 
 		ob.Add(&s)
@@ -341,7 +361,7 @@ func FillOrderBook(client *binance.Client, cfg *utils.Config, tradeLogger *zerol
 	return ob, nil
 }
 
-func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
+func (ob *Orderbook) FillPrices() (added int, err error) {
 	file, err := os.OpenFile("orderbook.csv", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return 0, err
@@ -350,7 +370,7 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 
 	file.WriteString("Symbol,BASE,QUOTE,basePrecision,quotePrecision,tickSize,stepSize,marketStepSize,minQty,marketMinQty,maxQty,marketMaxQty,minNotional,ASK,BID,updatedAt\n")
 
-	res, err := client.NewTickerBookTickerService().Do(context.Background())
+	res, err := ob.Client.NewTickerBookTickerService().Do(context.Background())
 	if err != nil {
 		return 0, err
 	}
@@ -392,8 +412,8 @@ func (ob *Orderbook) FillPrices(client *binance.Client) (added int, err error) {
 	return
 }
 
-func (ob *Orderbook) UpdatePrices(client *binance.Client) (updated int, err error) {
-	res, err := client.NewTickerBookTickerService().Do(context.Background())
+func (ob *Orderbook) UpdatePrices() (updated int, err error) {
+	res, err := ob.Client.NewTickerBookTickerService().Do(context.Background())
 	if err != nil {
 		return 0, err
 	}
@@ -433,8 +453,8 @@ func NewMarketOrder(client *binance.Client, pair *currency.Pair, dir string, qty
 
 	res := order.(*binance.CreateOrderResponseFULL)
 
-	log.Info().Msg(binance.PrettyPrint(res))
-	log.Info().Msgf("Order for %s placed. %s %s %s for %s %s", logger.Cyan(symbol), dir, res.ExecutedQty, pair.Base, res.CummulativeQuoteQty, pair.Quote)
+	logger.Info(binance.PrettyPrint(res))
+	logger.InfoFmt("Order for %s placed. %s %s %s for %s %s", logger.Cyan(symbol), dir, res.ExecutedQty, pair.Base, res.CummulativeQuoteQty, pair.Quote)
 
 	return res, nil
 }

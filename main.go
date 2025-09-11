@@ -57,7 +57,7 @@ func main() {
 		return
 	}
 
-	added, err := OrderBook.FillPrices(client)
+	added, err := OrderBook.FillPrices()
 	if err != nil {
 		logger.Error(err)
 		logger.ErrorFmt("OrderBook not filled. Added %d symbols", added)
@@ -65,7 +65,7 @@ func main() {
 	}
 	logger.InfoFmt("OrderBook filled with %d symbols.", added)
 
-	triangles := OrderBook.FindTriangles(cfg.FeeRate)
+	triangles := OrderBook.FindTriangles()
 	logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
 
 	if !cfg.WdEnabled {
@@ -74,11 +74,10 @@ func main() {
 		return
 	}
 
-	if !cfg.SimulationMode {
-		AccountBalances, err = CheckAccountBalance()
-		if err != nil {
-			logger.Error(err)
-		}
+	AccountBalances, err = CheckAccountBalance()
+	if err != nil {
+		logger.Error(err)
+		return
 	}
 
 	symbols := make([]string, 0, len(OrderBook.Symbols))
@@ -89,7 +88,7 @@ func main() {
 	// chunk := symbols[0:20]
 	// ConnectToExchange(chunk, OrderBook)
 
-	chunkSize := 50
+	chunkSize := 100
 	var wg sync.WaitGroup
 	for i := 0; i < len(symbols); i += chunkSize {
 		end := min(i+chunkSize, len(symbols))
@@ -143,7 +142,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 
 			for _, t := range opportunities {
 				if count < 5 {
-					locked, err := t.Execute(client, ob, cfg.OrderUSDCAmount)
+					locked, err := t.Execute(ob, cfg.OrderUSDCAmount)
 					if err != nil {
 						logger.Error(err)
 						continue
@@ -168,7 +167,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 		}
 
 		time.Sleep(time.Second * 10)
-		updated, err := ob.UpdatePrices(client)
+		updated, err := ob.UpdatePrices()
 		if err != nil {
 			logger.Error(err)
 			continue

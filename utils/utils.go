@@ -2,10 +2,12 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 
 	binance "github.com/binance/binance-connector-go"
 )
@@ -44,4 +46,13 @@ func CheckUSDCBalance(client *binance.Client) (*binance.Balance, error) {
 	}
 
 	return nil, err
+}
+
+func GoroutineId() uint64 {
+	b := make([]byte, 64)
+	b = b[:runtime.Stack(b, false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	b = b[:bytes.IndexByte(b, ' ')]
+	n, _ := strconv.ParseUint(string(b), 10, 64)
+	return n
 }
