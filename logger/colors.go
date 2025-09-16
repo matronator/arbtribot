@@ -9,20 +9,31 @@ func ColorizeNumber(i float64, min *float64, max *float64) string {
 
 	if min == nil {
 		minVal = 0
+	} else {
+		minVal = *min
 	}
 	if max == nil {
 		maxVal = 100
+	} else {
+		maxVal = *max
+	}
+
+	// Handle edge case where min == max
+	if maxVal == minVal {
+		return Yellow(strconv.FormatFloat(i, 'f', 0, 64)) // Default to yellow if range is zero
 	}
 
 	percentage := (i - minVal) / (maxVal - minVal) * 100
 
 	switch {
-	case percentage >= 66:
+	case percentage > 66 && percentage <= 100:
 		return Red(strconv.FormatFloat(i, 'f', 0, 64))
-	case percentage >= 33:
+	case percentage >= 33 && percentage <= 66:
 		return Yellow(strconv.FormatFloat(i, 'f', 0, 64))
-	default:
+	case percentage >= 0 && percentage <= 33:
 		return Green(strconv.FormatFloat(i, 'f', 0, 64))
+	default:
+		return Dim(strconv.FormatFloat(i, 'f', 0, 64))
 	}
 }
 

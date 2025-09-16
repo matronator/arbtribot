@@ -404,6 +404,10 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 		t.priceCache = NewPriceCache()
 	}
 
+	// Variables for colorizing cache size output
+	zero := float64(0)
+	thousand := float64(1000)
+
 	// Get current prices for all three paths
 	paths := [3]*Path{t.PathA, t.PathB, t.PathC}
 	var priceTuples [3]PriceTuple
@@ -434,8 +438,6 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 
 	// Check cache first
 	if result, exists := t.priceCache.Get(tc); exists {
-		zero := float64(0)
-		thousand := float64(1000)
 		logger.DebugFmt(
 			"Triangle %s using %s result. Profit: %g USDC (Cache size: %s)",
 			t,
@@ -449,15 +451,13 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 	}
 
 	// Debug: Log cache key details
-	zero := float64(0)
-	thousand := float64(1000)
 	if ob.Config.VerboseLogging {
 		logger.DebugFmt("Triangle %s cache MISS. Key: A[%s/%s] B[%s/%s] C[%s/%s] (Cache size: %s)",
 			t,
 			tc.SymbolA.Ask, tc.SymbolA.Bid,
 			tc.SymbolB.Ask, tc.SymbolB.Bid,
 			tc.SymbolC.Ask, tc.SymbolC.Bid,
-			logger.ColorizeNumber(float64(t.priceCache.Size()), &zero, &thousand))
+			logger.ColorizeNumber(float64(t.priceCache.Size()), nil, &thousand))
 	}
 
 	// Calculate new result
@@ -470,7 +470,7 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 		err:    err,
 	})
 
-	logger.DebugFmt("Triangle %s %s new result. Profit: %g USDC (Cache size: %s)", t, logger.Blue("CALCULATED"), profit, logger.ColorizeNumber(float64(t.priceCache.Size()), &zero, &thousand))
+	logger.DebugFmt("Triangle %s %s new result. Profit: %g USDC (Cache size: %s)", t, logger.Blue("CALCULATED"), profit, logger.ColorizeNumber(float64(t.priceCache.Size()), nil, &thousand))
 	// if ob.Config.VerboseLogging {
 	// }
 
