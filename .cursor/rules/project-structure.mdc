@@ -1,0 +1,43 @@
+---
+alwaysApply: true
+description: Project structure and architecture patterns for the arbitrage bot
+---
+
+# Arbitrage Bot Project Structure
+
+## Core Architecture
+The arbitrage bot follows a modular architecture with clear separation of concerns:
+
+- **Main Entry Point**: [main.go](mdc:main.go) - Initializes the bot, sets up websocket connections, and manages the main trading loop
+- **Arbitrage Engine**: [arbitrage/arbitrage.go](mdc:arbitrage/arbitrage.go) - Core arbitrage detection and execution logic
+- **Order Book Management**: [arbitrage/orderbook.go](mdc:arbitrage/orderbook.go) - Real-time order book data handling and triangle detection
+- **Currency System**: [currency/pairs.go](mdc:currency/pairs.go) - Currency pair definitions and management
+- **Exchange Interface**: [exchange.go](mdc:exchange.go) - Binance API integration and order execution
+- **Configuration**: [utils/config.go](mdc:utils/config.go) - Environment-based configuration management
+- **Logging**: [logger/logger.go](mdc:logger/logger.go) - Structured logging with color support
+
+## Key Components
+
+### Triangle Arbitrage
+- **Triangle Structure**: Three sequential trades forming a closed loop (e.g., USDC → BTC → ETH → USDC)
+- **Path Objects**: Each leg of the triangle with direction (BUY/SELL) and price data
+- **Arbitrage Detection**: Real-time profit calculation using order book data
+- **Execution Engine**: Atomic trade execution with rollback capabilities
+
+### Order Book Management
+- **Concurrent Maps**: Thread-safe symbol storage using `cmap.ConcurrentMap`
+- **Atomic Values**: Lock-free price updates using `atomic.Value`
+- **WebSocket Integration**: Real-time price feeds from Binance
+- **Triangle Discovery**: Automatic detection of profitable trading triangles
+
+### Configuration System
+- **Environment Variables**: All settings loaded from `.env` file
+- **Simulation Mode**: Safe testing without real trades
+- **Fee Management**: Configurable trading fees and minimum amounts
+- **Asset Selection**: Configurable base currencies and starting assets
+
+## File Organization
+- Keep related functionality in the same package
+- Use descriptive package names that reflect their purpose
+- Separate concerns: trading logic, data structures, utilities, and external integrations
+- Maintain clear interfaces between packages

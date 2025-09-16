@@ -3,9 +3,6 @@ package main
 import (
 	"arbtribot/arbitrage"
 	"arbtribot/logger"
-	"os"
-	"os/signal"
-	"syscall"
 
 	binance "github.com/binance/binance-connector-go"
 )
@@ -21,63 +18,61 @@ func Test() {
 	defer client.Close()
 }
 
-func ConnectToExchange(symbols []string, ob *arbitrage.Orderbook) {
-	websocketStreamClient := binance.NewWebsocketStreamClient(true)
+type BookTickerHandler struct {
+	orderbook *arbitrage.Orderbook
+}
 
-	wsBookTickerHandler := func(event *binance.WsBookTickerEvent) {
-		bookTicker := arbitrage.BookTicker{
-			AskPrice: event.BestAskPrice,
-			AskQty:   event.BestAskQty,
-			BidPrice: event.BestBidPrice,
-			BidQty:   event.BestBidQty,
-			UpdateID: event.UpdateID,
+func NewBookTickerHandler(orderbook *arbitrage.Orderbook) *BookTickerHandler {
+	return &BookTickerHandler{
+		orderbook: orderbook,
+	}
+}
+
+func (h *BookTickerHandler) HandleError(err error) {
+	logger.Error(err)
+}
+
+func (h *BookTickerHandler) HandleBookTickerEvent(event *binance.WsBookTickerEvent) {
+	bookTicker := arbitrage.BookTicker{
+		AskPrice: event.BestAskPrice,
+		AskQty:   event.BestAskQty,
+		BidPrice: event.BestBidPrice,
+		BidQty:   event.BestBidQty,
+		UpdateID: event.UpdateID,
+	}
+
+	if val, ok := h.orderbook.Symbols.Get(event.Symbol); ok {
+		currentBook := val.GetBookTicker()
+		if currentBook != nil {
+			if event.BestAskPrice == currentBook.AskPrice && event.BestBidPrice == currentBook.BidPrice {
+				return
+			}
 		}
 
-		if val, ok := ob.Symbols.Get(event.Symbol); ok {
-			if event.BestAskPrice == val.BookTicker.AskPrice && event.BestBidPrice == val.BookTicker.BidPrice {
-				return
-			}
-			updated, err := ob.UpdateBookTicker(event.Symbol, &bookTicker)
-			if err != nil {
-				logger.Error(err)
-			}
+		bookCopy := &arbitrage.BookTicker{
+			AskPrice: bookTicker.AskPrice,
+			AskQty:   bookTicker.AskQty,
+			BidPrice: bookTicker.BidPrice,
+			BidQty:   bookTicker.BidQty,
+			UpdateID: bookTicker.UpdateID,
+		}
 
-			if !updated {
-				logger.WarningFmt("Symbol %s couldn't update book ticker.", val.Pair.String())
-				return
-			}
-
-			// logger.InfoFmt("%s %s - Bid: %s (%s qty) Ask: %s (%s qty)", logger.Yellow("Updated symbol"), val.Pair.String(), logger.Green(bookTicker.BidPrice), logger.Green(bookTicker.BidQty), logger.Red(bookTicker.AskPrice), logger.Red(bookTicker.AskQty))
-
+		updated, err := h.orderbook.UpdateBookTicker(event.Symbol, bookCopy)
+		if err != nil {
+			logger.Error(err)
 			return
 		}
 
-		logger.InfoFmt("Symbol %s not found.", event.Symbol)
-	}
+		if !updated {
+			logger.WarningFmt("Symbol %s couldn't update book ticker.", val.Pair.String())
+			return
+		}
 
-	errHandler := func(err error) {
-		logger.Error(err)
-	}
+		// Debug: Log price updates
+		logger.DebugFmt("Updated %s: Ask=%s, Bid=%s", event.Symbol, bookCopy.AskPrice, bookCopy.BidPrice)
 
-	logger.InfoFmt("Trying to connect to %d symbols", len(symbols))
-
-	doneCh, stopCh, err := websocketStreamClient.WsCombinedBookTickerServe(symbols, wsBookTickerHandler, errHandler)
-	if err != nil {
-		logger.Error(err)
 		return
 	}
 
-	logger.InfoFmt("Connected!")
-
-	quitChannel := make(chan os.Signal, 1)
-	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
-
-	logger.InfoFmt("Listening to websocket updates for symbols: %v", symbols)
-
-	go func() {
-		<-quitChannel
-		logger.InfoFmt("Received interrupt signal. Closing connection...")
-		stopCh <- struct{}{} // use stopCh to stop streaming
-	}()
-	<-doneCh
+	logger.InfoFmt("Symbol %s not found.", event.Symbol)
 }

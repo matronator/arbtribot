@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/quagmt/udecimal"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
 type Orderbook struct {
@@ -29,10 +29,21 @@ type Symbol struct {
 	BasePrecision  int8
 	QuotePrecision int8
 	Filter         ExchangeFilter
-	BookTicker     *BookTicker
+	bookData       atomic.Value // *BookTicker
 	LastUpdated    time.Time
 	Triangles      []*Triangle
 	Lock           *sync.Mutex
+}
+
+func (s *Symbol) SetBookTicker(book *BookTicker) {
+	s.bookData.Store(book)
+}
+
+func (s *Symbol) GetBookTicker() *BookTicker {
+	if v := s.bookData.Load(); v != nil {
+		return v.(*BookTicker)
+	}
+	return nil
 }
 
 type ExchangeFilter struct {
@@ -81,85 +92,27 @@ func (ob *Orderbook) UpdateBookTicker(key string, book *BookTicker) (updated boo
 
 func (s *Symbol) Update(book *BookTicker, ob *Orderbook) error {
 	s.Lock.Lock()
-	defer s.Lock.Unlock()
 
-	s.BookTicker = book
-	err := s.updateTriangles(book, ob)
-	if err != nil {
-		return err
+	bookCopy := &BookTicker{
+		BidPrice: book.BidPrice,
+		BidQty:   book.BidQty,
+		AskPrice: book.AskPrice,
+		AskQty:   book.AskQty,
+		UpdateID: book.UpdateID,
 	}
 
-	return nil
-}
+	s.SetBookTicker(bookCopy)
+	s.LastUpdated = time.Now()
 
-func (s *Symbol) updateTriangles(book *BookTicker, ob *Orderbook) error {
-	for _, t := range s.Triangles {
-		paths := map[string]*Path{"A": t.PathA, "B": t.PathB, "C": t.PathC}
-		for key, path := range paths {
-			if path.Pair.String() == s.Pair.String() {
-				t.Lock.L.Lock()
-				t.Locked = true
-				switch key {
-				case "A":
-					t.PathA.BookTicker = book
-				case "B":
-					t.PathB.BookTicker = book
-				case "C":
-				default:
-					t.PathC.BookTicker = book
-				}
-				t.Locked = false
-				t.Lock.L.Unlock()
-				t.Lock.Broadcast()
-			}
-		}
+	triangles := make([]*Triangle, len(s.Triangles))
+	copy(triangles, s.Triangles)
 
-		err := s.TryExecuteTriangle(t, ob)
+	s.Lock.Unlock()
+
+	for _, t := range triangles {
+		err := t.updateTriangle(ob)
 		if err != nil {
 			return err
-		}
-	}
-
-	return nil
-}
-
-func (s *Symbol) TryExecuteTriangle(t *Triangle, ob *Orderbook) error {
-	if t.OnCooldown {
-		return nil
-	}
-
-	found, profit, err := t.CheckArbitrage(ob.Config.FeeRate)
-	if err != nil {
-		return err
-	}
-
-	if found && profit > 1.001 && profit < 1.8 {
-		t.Locked = true
-		t.Lock.L.Lock()
-		defer func() {
-			t.Locked = false
-			t.Lock.L.Unlock()
-			t.Lock.Broadcast()
-		}()
-		logger.InfoFmt("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
-		if !ob.Config.SimulationMode {
-			onCooldown, err := t.Execute(ob, ob.Config.OrderUSDCAmount)
-			if err != nil {
-				return err
-			}
-			if onCooldown {
-				logger.WarningFmt("Triangle %s LOCKED from executing trades.", t.String())
-				return fmt.Errorf("triangle %s on cooldown", t.String())
-			}
-		} else {
-			log.Info().Str("triangle", t.String()).Msgf("%s", logger.Yellow("Would execute triangle if in LIVE mode."))
-			ob.TradeLogger.Info().
-				Str("triangle", t.String()).
-				Float64("profit", profit).
-				Msgf("Executed triangle %s for profit %g", t.String(), profit)
-
-			// Lock the triangle to simulate LIVE mode behavior
-			t.Cooldown(10)
 		}
 	}
 
@@ -189,19 +142,18 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 
 			if startPair.Pair.Quote == currency.USDC {
 				path1 = &Path{
-					Pair:       startPair.Pair,
-					BookTicker: startPair.BookTicker,
-					Direction:  "BUY",
+					Pair:      startPair.Pair,
+					Direction: "BUY",
 				}
 				firstCoin = startPair.Pair.Base
 			} else {
 				path1 = &Path{
-					Pair:       startPair.Pair,
-					BookTicker: startPair.BookTicker,
-					Direction:  "SELL",
+					Pair:      startPair.Pair,
+					Direction: "SELL",
 				}
 				firstCoin = startPair.Pair.Quote
 			}
+			// Don't set BookTicker here - it will be fetched fresh during simulation
 
 			localTriangles := make([]*Triangle, 0)
 
@@ -218,21 +170,20 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 
 				if midPair.Pair.Base == firstCoin {
 					path2 = &Path{
-						Pair:       midPair.Pair,
-						BookTicker: midPair.BookTicker,
-						Direction:  "SELL",
+						Pair:      midPair.Pair,
+						Direction: "SELL",
 					}
 					middleCoin = midPair.Pair.Quote
 				} else if midPair.Pair.Quote == firstCoin {
 					path2 = &Path{
-						Pair:       midPair.Pair,
-						BookTicker: midPair.BookTicker,
-						Direction:  "BUY",
+						Pair:      midPair.Pair,
+						Direction: "BUY",
 					}
 					middleCoin = midPair.Pair.Base
 				} else {
 					continue
 				}
+				// Don't set BookTicker here - it will be fetched fresh during simulation
 
 				for endItem := range ob.Symbols.IterBuffered() {
 					endSymbol := endItem.Key
@@ -250,19 +201,19 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 
 					if endPair.Pair.Base == middleCoin && endPair.Pair.Quote == currency.USDC {
 						path3 = &Path{
-							Pair:       endPair.Pair,
-							BookTicker: endPair.BookTicker,
-							Direction:  "SELL",
+							Pair:      endPair.Pair,
+							Direction: "SELL",
 						}
 					} else if endPair.Pair.Quote == middleCoin && endPair.Pair.Base == currency.USDC {
 						path3 = &Path{
-							Pair:       endPair.Pair,
-							BookTicker: endPair.BookTicker,
-							Direction:  "BUY",
+							Pair:      endPair.Pair,
+							Direction: "BUY",
 						}
 					} else {
 						continue
 					}
+
+					// Don't set BookTicker here - it will be fetched fresh during simulation
 
 					lock := sync.NewCond(&sync.Mutex{})
 					triangle := &Triangle{
@@ -271,6 +222,8 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 						PathC:      path3,
 						OnCooldown: false,
 						Lock:       lock,
+						mu:         sync.RWMutex{},
+						priceCache: NewPriceCache(),
 					}
 
 					// Optional: Add triangles to symbols
@@ -429,13 +382,13 @@ func (ob *Orderbook) UpdatePrices() (updated int, err error) {
 
 	for _, symbol := range res {
 		if val, ok := ob.Symbols.Get(symbol.Symbol); ok {
-			if val.BookTicker.AskPrice != symbol.AskPrice || val.BookTicker.BidPrice != symbol.BidPrice {
+			if val.GetBookTicker().AskPrice != symbol.AskPrice || val.GetBookTicker().BidPrice != symbol.BidPrice {
 				book := &BookTicker{
 					AskPrice: symbol.AskPrice,
 					AskQty:   symbol.AskQty,
 					BidPrice: symbol.BidPrice,
 					BidQty:   symbol.BidQty,
-					UpdateID: val.BookTicker.UpdateID + 1,
+					UpdateID: val.GetBookTicker().UpdateID + 1,
 				}
 
 				_, err := ob.UpdateBookTicker(symbol.Symbol, book)
@@ -463,20 +416,20 @@ func NewMarketOrder(client *binance.Client, pair *currency.Pair, dir string, qty
 	res := order.(*binance.CreateOrderResponseFULL)
 
 	logger.Info(binance.PrettyPrint(res))
-	logger.InfoFmt("Order for %s placed. %s %s %s for %s %s", logger.Cyan(symbol), dir, res.ExecutedQty, pair.Base, res.CummulativeQuoteQty, pair.Quote)
+	logger.InfoFmt("Order for %s placed. %s %s %s for %s %s at price %s %s", logger.Cyan(symbol), dir, res.ExecutedQty, pair.Base, res.CummulativeQuoteQty, pair.Quote, res.Fills[0].Price, pair.Quote)
 
 	return res, nil
 }
 
 func (s *Symbol) GetUSDPrice(ob *Orderbook) (string, error) {
 	if s.Pair.Quote.String() == "USDC" {
-		return s.BookTicker.AskPrice, nil
+		return s.GetBookTicker().AskPrice, nil
 	}
 
 	c := s.Pair.Base.String()
 	symbol := c + "USDC"
 	if val, ok := ob.Symbols.Get(symbol); ok {
-		return val.BookTicker.AskPrice, nil
+		return val.GetBookTicker().AskPrice, nil
 	}
 
 	for _, base := range currency.BaseCurrencies {
@@ -500,13 +453,13 @@ func checkSymbol(base string, quote string, ob *Orderbook) (string, error) {
 	symbol := base + quote
 	if val, ok := ob.Symbols.Get(symbol); ok {
 		quoteSymbol, _ := ob.Symbols.Get(quote + "USDC")
-		quotePriceS := quoteSymbol.BookTicker.AskPrice
+		quotePriceS := quoteSymbol.GetBookTicker().AskPrice
 		quotePrice, err := udecimal.Parse(quotePriceS)
 		if err != nil {
 			return "", err
 		}
 
-		price, err := udecimal.Parse(val.BookTicker.AskPrice)
+		price, err := udecimal.Parse(val.GetBookTicker().AskPrice)
 		if err != nil {
 			return "", err
 		}

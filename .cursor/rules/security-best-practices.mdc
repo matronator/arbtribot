@@ -1,0 +1,187 @@
+---
+description: Security and best practices for the arbitrage bot
+---
+
+# Security and Best Practices
+
+## API Key Management
+
+### Environment Variables
+- Store all sensitive data in `.env` file
+- Never commit API keys to version control
+- Use different keys for testing and production
+- Rotate keys regularly
+
+### Key Validation
+```go
+// Validate API keys on startup
+if cfg.APIKey == "" || cfg.APISecret == "" {
+    logger.ErrorFmt("API keys not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY in .env")
+    return
+}
+```
+
+### Key Masking in Logs
+```go
+// Always mask sensitive data in logs
+log.Info().
+    Str("API_KEY", "***").
+    Str("API_SECRET", "***").
+    Msg("Bot started with config")
+```
+
+## Simulation Mode Safety
+
+### Default to Simulation
+- Always default to simulation mode
+- Require explicit configuration for live trading
+- Implement multiple confirmation steps
+- Use clear visual indicators
+
+```go
+if cfg.SimulationMode {
+    logger.InfoFmt("MODE: %s %s", logger.Green("SIMULATION"), logger.Italic("(no real trades)"))
+} else {
+    logger.InfoFmt("MODE: %s %s", logger.Yellow("LIVE TRADING"), logger.Italic("(real trades will be placed)"))
+}
+```
+
+### Configuration Validation
+- Validate all configuration values
+- Check for reasonable limits
+- Prevent dangerous configurations
+- Require explicit confirmation for live trading
+
+## Financial Safety
+
+### Amount Limits
+- Implement maximum trade amounts
+- Validate against account balance
+- Use conservative default amounts
+- Implement daily/hourly limits
+
+### Risk Management
+- Set maximum loss limits
+- Implement stop-loss mechanisms
+- Monitor account balance continuously
+- Alert on unusual activity
+
+### Fee Validation
+- Validate fee rates are reasonable
+- Check for minimum profit thresholds
+- Account for all trading costs
+- Monitor slippage and spreads
+
+## Code Security
+
+### Input Validation
+- Validate all external inputs
+- Sanitize user-provided data
+- Check for reasonable ranges
+- Prevent injection attacks
+
+### Error Information
+- Don't expose sensitive information in errors
+- Log errors securely
+- Use generic error messages for users
+- Keep detailed logs internal
+
+### Dependency Management
+- Keep dependencies up to date
+- Use only trusted packages
+- Audit dependencies regularly
+- Pin specific versions
+
+## Network Security
+
+### HTTPS/TLS
+- Use secure connections for all API calls
+- Validate SSL certificates
+- Implement proper timeout handling
+- Use connection pooling
+
+### Rate Limiting
+- Respect API rate limits
+- Implement exponential backoff
+- Monitor API usage
+- Handle rate limit errors gracefully
+
+## Operational Security
+
+### Logging Security
+- Don't log sensitive data
+- Use structured logging
+- Implement log rotation
+- Secure log file permissions
+
+### Process Security
+- Run with minimal privileges
+- Use dedicated user accounts
+- Implement process monitoring
+- Secure file permissions
+
+### Backup and Recovery
+- Regular configuration backups
+- Test recovery procedures
+- Document emergency procedures
+- Maintain audit trails
+
+## Monitoring and Alerting
+
+### Health Checks
+- Monitor bot status continuously
+- Check API connectivity
+- Validate configuration
+- Monitor resource usage
+
+### Alerting
+- Alert on critical errors
+- Monitor unusual trading patterns
+- Track performance metrics
+- Notify on configuration changes
+
+### Audit Logging
+- Log all trading decisions
+- Track configuration changes
+- Monitor access patterns
+- Maintain compliance records
+
+## Development Security
+
+### Code Review
+- Require code reviews for all changes
+- Focus on security implications
+- Test all changes in simulation
+- Validate against security checklist
+
+### Testing Security
+- Test with various attack scenarios
+- Validate error handling
+- Test configuration edge cases
+- Simulate network failures
+
+### Deployment Security
+- Use secure deployment practices
+- Validate all configurations
+- Test in staging environment
+- Implement rollback procedures
+
+## Compliance and Legal
+
+### Regulatory Compliance
+- Understand applicable regulations
+- Implement required controls
+- Maintain proper records
+- Consult legal experts when needed
+
+### Data Protection
+- Protect user data appropriately
+- Implement data retention policies
+- Secure data transmission
+- Regular security audits
+
+### Documentation
+- Document all security measures
+- Maintain security procedures
+- Regular security training
+- Update documentation regularly

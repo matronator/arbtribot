@@ -1,0 +1,191 @@
+---
+globs: *.go
+description: Error handling and logging patterns for the arbitrage bot
+---
+
+# Error Handling and Logging Patterns
+
+## Logging Framework
+The project uses `github.com/rs/zerolog` for structured logging with the following patterns:
+
+### Logger Setup
+- Use structured logging with fields instead of string formatting
+- Implement different log levels: Debug, Info, Warn, Error
+- Use colored output for console logging
+- Implement file rotation for production logs
+
+### Logging Functions
+```go
+// Use these functions from logger package
+logger.DebugFmt("Debug message: %s", value)
+logger.InfoFmt("Info message: %s", value) 
+logger.WarningFmt("Warning message: %s", value)
+logger.ErrorFmt("Error message: %s", value)
+logger.Error(err) // For error objects
+```
+
+### Structured Logging
+```go
+// Good - structured logging
+log.Info().
+    Str("symbol", symbol.Pair.String()).
+    Float64("quoteQty", quoteQty).
+    Float64("baseQty", baseQty).
+    Str("price", priceString).
+    Msgf("%sing %s %s for %g %s", direction, quantity, base, amount, quote)
+
+// Bad - string formatting
+log.Info(fmt.Sprintf("Trading %s %s for %g %s", symbol, quantity, amount, quote))
+```
+
+## Error Handling Patterns
+
+### Error Propagation
+- Always return errors from functions that can fail
+- Use `fmt.Errorf` with `%w` verb for error wrapping
+- Provide context about what operation failed
+
+```go
+// Good
+if err != nil {
+    return fmt.Errorf("failed to execute trade for symbol %s: %w", symbol, err)
+}
+
+// Good - with additional context
+if !ok {
+    return fmt.Errorf("symbol %s not found in orderbook", symbol)
+}
+```
+
+### Error Classification
+- Distinguish between recoverable and fatal errors
+- Implement retry logic for transient errors
+- Fail fast for configuration or validation errors
+
+### Trading-Specific Error Handling
+```go
+// Check for specific trading conditions
+underMaxQty, err := checkMarketLotSize(symbol, path, amount)
+if err != nil || !underMaxQty {
+    logger.WarningFmt("Path has quantity %g larger than MARKET_LOT_SIZE maxQuantity", amount)
+    return false, err
+}
+
+// Handle rollback scenarios
+if err != nil {
+    logger.WarningFmt("Rolling back executed trades for triangle %s", triangle.String())
+    // Implement rollback logic
+    return nil, err
+}
+```
+
+## Logging Levels and Usage
+
+### Debug Level
+- Detailed execution information
+- Price calculations and validations
+- Internal state changes
+- Only enabled when `DEBUG_MODE=true`
+- Consider only logging debug info when `VERBOSE_LOGGING=true`
+
+```go
+if cfg.VerboseLogging {
+    logger.DebugFmt("Simulated path %s %s with amount %g: executedQty %g - quoteQty %g", 
+        p.Direction, p.Pair.String(), amount, executedQty, quoteQty)
+}
+```
+
+### Info Level
+- Important business events
+- Trade executions and results
+- Configuration loading
+- System startup/shutdown
+
+```go
+logger.InfoFmt("OrderBook filled with %d symbols.", added)
+logger.InfoFmt("%s", logger.Green("Arbitrage found!"))
+```
+
+### Warning Level
+- Non-fatal issues that should be noted
+- Configuration warnings
+- Trade execution warnings
+- Performance concerns
+
+```go
+logger.WarningFmt("There was an error running the populator. Some pairs might be outdated.")
+logger.WarningFmt("Triangle %s LOCKED from trading.", triangle.String())
+```
+
+### Error Level
+- Fatal errors that stop execution
+- API errors
+- Configuration errors
+- Critical system failures
+
+```go
+logger.Error(err)
+logger.ErrorFmt("OrderBook not filled. Added %d symbols", added)
+```
+
+## Color Coding
+Use the logger color functions for better readability:
+
+```go
+logger.Green("Success message")
+logger.Yellow("Warning message") 
+logger.Red("Error message")
+logger.Blue("Info message")
+logger.Cyan("Data values")
+logger.Dim("Secondary information")
+logger.BgYellow("Highlighted text")
+logger.BgGreen("Success highlight")
+logger.Italic("Emphasized text")
+```
+
+## Error Recovery Patterns
+
+### Graceful Degradation
+- Continue operation when non-critical components fail
+- Implement fallback mechanisms
+- Log errors but don't stop the entire system
+
+### Retry Logic
+```go
+// Implement retry with exponential backoff
+maxRetries := 3
+for i := 0; i < maxRetries; i++ {
+    err := operation()
+    if err == nil {
+        break
+    }
+    if i == maxRetries-1 {
+        logger.ErrorFmt("Operation failed after %d retries: %v", maxRetries, err)
+        return err
+    }
+    time.Sleep(time.Duration(i+1) * time.Second)
+}
+```
+
+### Circuit Breaker Pattern
+- Implement cooldown periods for failing operations
+- Use triangle locking to prevent rapid re-execution
+- Monitor error rates and adjust behavior accordingly
+
+## Log File Management
+- Use lumberjack for log rotation
+- Separate log files for different components
+- Implement log level filtering
+- Archive old logs automatically
+
+## Performance Considerations
+- Use structured logging to avoid string concatenation
+- Implement log sampling for high-frequency events
+- Use appropriate log levels to control verbosity
+- Consider async logging for high-throughput scenarios
+
+## Testing and Debugging
+- Use consistent log formats for easier parsing
+- Include correlation IDs for tracing requests
+- Implement debug modes for detailed logging
+- Use log analysis tools for production monitoring

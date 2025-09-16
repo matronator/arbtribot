@@ -16,6 +16,7 @@ type Config struct {
 	FeeRate         float64  // Binance spot trading fee rate (default 0.001 = 0.1%)
 	OrderUSDCAmount float64  // Amount of USDC the trades will be executed for
 	DebugMode       bool     // Enable debug logging
+	VerboseLogging  bool     // Enable very verbose logging (debug level)
 	StartAsset      string   // Starting currency
 	BaseAssets      []string // Base currencies
 	WdEnabled       bool
@@ -32,6 +33,7 @@ func LoadConfig() *Config {
 			FeeRate:         0.001, // 0.1% fee = 0.001
 			OrderUSDCAmount: 15,
 			DebugMode:       false, // Default to false, can be set via env
+			VerboseLogging:  false,
 			StartAsset:      "USDC",
 			BaseAssets:      []string{"USDC", "BTC", "BNB", "ETH"},
 			WdEnabled:       false,
@@ -57,6 +59,7 @@ func LoadConfig() *Config {
 		FeeRate:         fee,
 		OrderUSDCAmount: usdcAmount,
 		DebugMode:       os.Getenv("DEBUG_MODE") == "true",
+		VerboseLogging:  os.Getenv("VERBOSE_LOGGING") == "true",
 		StartAsset:      os.Getenv("START_ASSET"),
 		BaseAssets:      strings.Split(os.Getenv("BASE_ASSETS"), ","),
 		WdEnabled:       os.Getenv("WD_ENABLED") == "true",

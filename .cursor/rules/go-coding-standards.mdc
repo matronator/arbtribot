@@ -1,0 +1,122 @@
+---
+globs: *.go
+description: Go coding standards and patterns for the arbitrage bot
+---
+
+# Go Coding Standards
+
+## Code Style and Conventions
+
+### Package Organization
+- Use lowercase package names (e.g., `arbitrage`, `currency`, `logger`)
+- Keep packages focused on a single responsibility
+- Use descriptive package names that clearly indicate purpose
+
+### Naming Conventions
+- **Exported Types**: PascalCase (e.g., `Triangle`, `Orderbook`, `Config`)
+- **Exported Functions**: PascalCase (e.g., `CheckArbitrage`, `Execute`, `LoadConfig`)
+- **Unexported**: camelCase (e.g., `bookData`, `simulatePath`)
+- **Constants**: PascalCase for exported, camelCase for unexported
+- **Variables**: camelCase (e.g., `AccountBalances`, `cfg`, `client`)
+
+### Error Handling
+- Always handle errors explicitly - never ignore them
+- Use descriptive error messages with context
+- Return errors early to avoid deep nesting
+- Use `fmt.Errorf` for error wrapping with context
+
+```go
+// Good
+if err != nil {
+    return fmt.Errorf("failed to parse price for symbol %s: %w", symbol, err)
+}
+
+// Acceptable in deeply nested functions
+if err != nil {
+    return err
+}
+```
+
+### Concurrency Patterns
+- Use `sync.Mutex` for protecting shared state
+- Use `sync.RWMutex` for read-heavy operations
+- Use `sync.Cond` for condition-based waiting
+- Use `atomic.Value` for lock-free operations when appropriate
+- Never forget to release locks
+
+```go
+// Good
+t.mu.RLock()
+defer t.mu.RUnlock()
+
+// Good
+t.Lock.L.Lock()
+defer t.Lock.L.Unlock()
+
+// Good
+t.mu.Lock()
+t.someProperty = someValue
+t.mu.Unlock()
+```
+
+### Decimal Precision
+- Use `github.com/quagmt/udecimal` for all financial calculations
+- Never use `float64` for money calculations, except for simulations
+- Always parse strings to decimal before calculations
+
+```go
+// Good
+price, err := udecimal.Parse(priceString)
+if err != nil {
+    return err
+}
+result := price.Mul(quantity)
+
+// Good in simulation
+price, _ := strconv.ParseFloat(priceString, 64)
+result := price * quantity
+```
+
+### Function Design
+- Keep functions focused and single-purpose
+- Use meaningful parameter names
+- Return multiple values when appropriate (result, error)
+- Prefer small, composable functions over large ones
+
+### Struct Design
+- Use pointer receivers for methods that modify the struct
+- Prefer using pointer receivers over value receivers for most methods for consistency
+- Embed common functionality using composition
+- Use tags for JSON/struct validation when needed
+
+### Interface Design
+- Keep interfaces small and focused
+- Use descriptive interface names ending in "-er" when appropriate
+- Prefer composition over inheritance
+
+### Comments and Documentation
+- Document all exported types and functions
+- Use complete sentences in comments
+- Explain the "why" not just the "what"
+- Use `// TODO:` for temporary workarounds
+- Use `// FIXME:` for known issues
+
+### Import Organization
+- Group imports: standard library, third-party, local packages
+- Use blank lines to separate groups
+- Sort imports alphabetically within groups
+- For the package `github.com/binance/binance-connector-go` use the alias `binance` over the default `binance_connector`
+
+```go
+import (
+    "context"
+    "fmt"
+    "time"
+    
+    binance "github.com/binance/binance-connector-go"
+    "github.com/rs/zerolog/log"
+    
+    "arbtribot/currency"
+    "arbtribot/logger"
+)
+```

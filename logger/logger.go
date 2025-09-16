@@ -14,6 +14,14 @@ type ANSIStripper struct {
 	writer io.Writer
 }
 
+func Debug(format string, args ...any) {
+	log.Debug().Caller(1).Msgf(format, args...)
+}
+
+func DebugFmt(format string, args ...any) {
+	log.Debug().Caller(1).Msgf(format, args...)
+}
+
 func Info(msg string) {
 	log.Info().Caller(1).Msg(msg)
 }

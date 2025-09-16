@@ -1,0 +1,249 @@
+---
+description: Testing and simulation patterns for the arbitrage bot
+---
+
+# Testing and Simulation Patterns
+
+## Simulation Mode
+The bot includes a comprehensive simulation mode for safe testing:
+
+### Configuration
+- Set `SIMULATION_MODE=true` in `.env` file
+- Default to simulation mode for safety
+- Use identical logic for both simulation and live trading
+
+### Simulation Benefits
+- Test strategies without financial risk
+- Validate arbitrage detection algorithms
+- Debug trading logic safely
+- Performance testing with real market data
+
+## Testing Strategies
+
+### Unit Testing
+- Test individual functions with known inputs
+- Mock external dependencies (Binance API)
+- Use table-driven tests for multiple scenarios
+- Test edge cases and error conditions
+
+```go
+func TestCheckArbitrage(t *testing.T) {
+    tests := []struct {
+        name     string
+        triangle *Triangle
+        expected bool
+        profit   float64
+    }{
+        {
+            name:     "profitable triangle",
+            triangle: createTestTriangle(),
+            expected: true,
+            profit:   1.05,
+        },
+        // Add more test cases
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            found, profit, err := tt.triangle.CheckArbitrage(orderbook, 0.001)
+            assert.NoError(t, err)
+            assert.Equal(t, tt.expected, found)
+            assert.InDelta(t, tt.profit, profit, 0.01)
+        })
+    }
+}
+```
+
+### Integration Testing
+- Test complete arbitrage workflows
+- Use real market data with simulated trades
+- Validate order book updates and triangle detection
+- Test WebSocket connection handling
+
+### End-to-End Testing
+- Run full bot cycles in simulation mode
+- Validate configuration loading and validation
+- Test error handling and recovery mechanisms
+- Verify logging and monitoring
+
+## Mock Patterns
+
+### Exchange API Mocking
+```go
+type MockBinanceClient struct {
+    // Implement required interfaces
+}
+
+func (m *MockBinanceClient) CreateOrder(req *binance.CreateOrderRequest) (*binance.CreateOrderResponseFULL, error) {
+    // Return mock responses for testing
+    return &binance.CreateOrderResponseFULL{
+        ExecutedQty: "100.0",
+        // ... other fields
+    }, nil
+}
+```
+
+### Order Book Mocking
+```go
+func createMockOrderBook() *arbitrage.Orderbook {
+    ob := &arbitrage.Orderbook{
+        Symbols: cmap.New[*arbitrage.Symbol](),
+        Config:  &utils.Config{SimulationMode: true},
+    }
+    
+    // Add mock symbols with test data
+    symbol := &arbitrage.Symbol{
+        Pair: currency.Pair{Base: currency.BTC, Quote: currency.USDC},
+        // ... other fields
+    }
+    ob.Symbols.Set("BTCUSDC", symbol)
+    
+    return ob
+}
+```
+
+## Test Data Management
+
+### Currency Pair Testing
+- Test with various currency combinations
+- Include edge cases (very small/large amounts)
+- Test with different precision requirements
+- Validate step size compliance
+
+### Price Data Testing
+```go
+func createTestBookTicker(bid, ask string) *arbitrage.BookTicker {
+    return &arbitrage.BookTicker{
+        BidPrice: bid,
+        AskPrice: ask,
+        BidQty:   "1000.0",
+        AskQty:   "1000.0",
+        UpdateID: 12345,
+    }
+}
+```
+
+### Triangle Testing
+- Test all possible triangle combinations
+- Validate profit calculations
+- Test with different fee rates
+- Include negative profit scenarios
+
+## Performance Testing
+
+### Load Testing
+- Test with high-frequency price updates
+- Validate concurrent triangle checking
+- Monitor memory usage and goroutine leaks
+- Test WebSocket connection stability
+
+### Benchmark Testing
+```go
+func BenchmarkCheckArbitrage(b *testing.B) {
+    triangle := createTestTriangle()
+    orderbook := createMockOrderBook()
+    
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        triangle.CheckArbitrage(orderbook, 0.001)
+    }
+}
+```
+
+## Simulation-Specific Testing
+
+### Trade Simulation
+- Simulate complete arbitrage cycles
+- Validate quantity calculations
+- Test fee application
+- Verify profit calculations
+
+### Error Simulation
+- Test network disconnections
+- Simulate API errors
+- Test insufficient balance scenarios
+- Validate rollback mechanisms
+
+### Configuration Testing
+- Test all configuration options
+- Validate environment variable loading
+- Test default value handling
+- Verify configuration validation
+
+## Test Organization
+
+### File Structure
+```
+currency/
+  pairs_test.go
+arbitrage/
+  arbitrage_test.go
+  orderbook_test.go
+utils/
+  config_test.go
+```
+
+### Test Naming
+- Use descriptive test names
+- Include the scenario being tested
+- Use table-driven tests for multiple cases
+- Group related tests in subtests
+
+### Test Helpers
+```go
+func createTestTriangle() *arbitrage.Triangle {
+    return &arbitrage.Triangle{
+        PathA: &arbitrage.Path{
+            Pair:      currency.Pair{Base: currency.USDC, Quote: currency.BTC},
+            Direction: "BUY",
+        },
+        // ... other paths
+    }
+}
+
+func assertProfitWithinRange(t *testing.T, expected, actual float64, tolerance float64) {
+    if math.Abs(expected-actual) > tolerance {
+        t.Errorf("Expected profit %f, got %f (tolerance: %f)", expected, actual, tolerance)
+    }
+}
+```
+
+## Continuous Integration
+
+### Automated Testing
+- Run tests on every commit
+- Include simulation mode tests
+- Validate configuration loading
+- Test with different Go versions
+
+### Test Coverage
+- Aim for high test coverage on critical paths
+- Focus on trading logic and calculations
+- Include error handling paths
+- Test configuration and validation
+
+### Pre-commit Hooks
+- Run tests before allowing commits
+- Validate code formatting
+- Check for common issues
+- Ensure simulation mode is default
+
+## Production Readiness
+
+### Simulation Validation
+- Run extended simulation periods
+- Validate against historical data
+- Test with real market conditions
+- Monitor performance metrics
+
+### Gradual Rollout
+- Start with very small amounts
+- Monitor all trades closely
+- Implement additional safety checks
+- Have rollback procedures ready
+
+### Monitoring and Alerting
+- Set up alerts for simulation vs live mode
+- Monitor error rates and patterns
+- Track performance metrics
+- Implement health checks

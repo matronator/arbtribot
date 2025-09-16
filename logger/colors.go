@@ -1,5 +1,31 @@
 package logger
 
+import (
+	"strconv"
+)
+
+func ColorizeNumber(i float64, min *float64, max *float64) string {
+	var minVal, maxVal float64
+
+	if min == nil {
+		minVal = 0
+	}
+	if max == nil {
+		maxVal = 100
+	}
+
+	percentage := (i - minVal) / (maxVal - minVal) * 100
+
+	switch {
+	case percentage >= 66:
+		return Red(strconv.FormatFloat(i, 'f', 0, 64))
+	case percentage >= 33:
+		return Yellow(strconv.FormatFloat(i, 'f', 0, 64))
+	default:
+		return Green(strconv.FormatFloat(i, 'f', 0, 64))
+	}
+}
+
 func Reset() string {
 	return "\033[0m" // Reset all attributes
 }

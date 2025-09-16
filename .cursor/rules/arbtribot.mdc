@@ -1,0 +1,51 @@
+---
+description: Main arbitrage bot development guidelines and quick reference
+globs: *.go
+alwaysApply: true
+---
+
+# Arbtribot Development Guidelines
+
+## Quick Reference
+
+### Key Files
+- **Main Entry**: [main.go](mdc:main.go) - Bot initialization and main loop
+- **Arbitrage Engine**: [arbitrage/arbitrage.go](mdc:arbitrage/arbitrage.go) - Core trading logic
+- **Order Book**: [arbitrage/orderbook.go](mdc:arbitrage/orderbook.go) - Real-time price management
+- **Configuration**: [utils/config.go](mdc:utils/config.go) - Environment-based settings
+
+### Critical Patterns
+- Always use `udecimal` for financial calculations
+- Default to simulation mode for safety
+- Implement proper error handling with context
+- Use structured logging with zerolog
+- Validate all inputs and configurations
+- Don't delete any unrelated code, like commented out code or similar
+
+### Safety First
+- Never commit API keys to version control
+- Always test in simulation mode first
+- Implement proper rollback mechanisms
+- Monitor account balances continuously
+- Use conservative default settings
+
+### Development Workflow
+1. Make changes in simulation mode
+2. Test thoroughly with mock data
+3. Validate against real market data
+4. Review security implications
+5. Deploy with monitoring
+
+## Common Tasks
+
+### Modifying Trading Logic
+1. Update [arbitrage/arbitrage.go](mdc:arbitrage/arbitrage.go)
+2. Test with simulation mode
+3. Validate profit calculations
+4. Check error handling
+
+### Configuration Changes
+1. Update [utils/config.go](mdc:utils/config.go)
+2. Add to .env file
+3. Update documentation
+4. Test configuration loading

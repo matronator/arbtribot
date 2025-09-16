@@ -7,12 +7,35 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
 	"github.com/quagmt/udecimal"
 	"github.com/rs/zerolog/log"
 )
+
+type PriceTuple struct {
+	Ask string
+	Bid string
+}
+
+type TriangleCache struct {
+	SymbolA PriceTuple
+	SymbolB PriceTuple
+	SymbolC PriceTuple
+}
+
+type ArbitrageResult struct {
+	found  bool
+	profit float64
+	err    error
+}
+
+type PriceCache struct {
+	cache map[TriangleCache]ArbitrageResult
+	mutex sync.RWMutex
+}
 
 type Triangle struct {
 	PathA      *Path
@@ -21,38 +44,186 @@ type Triangle struct {
 	OnCooldown bool
 	Locked     bool
 	Lock       *sync.Cond
+	mu         sync.RWMutex
+
+	// Price-based caching
+	priceCache *PriceCache
 }
 
 func (t *Triangle) String() string {
-	var start, middle, end currency.Currency
-	if t.PathA.Direction == "BUY" {
-		start = t.PathA.Pair.Quote
-	} else {
-		start = t.PathA.Pair.Base
+	// var start, middle, end currency.Currency
+	// if t.PathA.Direction == "BUY" {
+	// 	start = t.PathA.Pair.Quote
+	// } else {
+	// 	start = t.PathA.Pair.Base
+	// }
+
+	// if t.PathB.Direction == "BUY" {
+	// 	middle = t.PathB.Pair.Quote
+	// } else {
+	// 	middle = t.PathB.Pair.Base
+	// }
+
+	// if t.PathC.Direction == "BUY" {
+	// 	end = t.PathC.Pair.Quote
+	// } else {
+	// 	end = t.PathC.Pair.Base
+	// }
+
+	return fmt.Sprintf("[%s -> %s -> %s]", t.PathA.Pair.String(), t.PathB.Pair.String(), t.PathC.Pair.String())
+	// return fmt.Sprintf("[%s -> %s -> %s] %s -> %s -> %s -> %s", t.PathA.Pair.String(), t.PathB.Pair.String(), t.PathC.Pair.String(), start, middle, end, start)
+}
+
+// NewPriceCache creates a new price cache with size limit
+func NewPriceCache() *PriceCache {
+	return &PriceCache{
+		cache: make(map[TriangleCache]ArbitrageResult),
+		mutex: sync.RWMutex{},
+	}
+}
+
+// Get retrieves a cached result for the given price combination
+func (pc *PriceCache) Get(tc TriangleCache) (ArbitrageResult, bool) {
+	pc.mutex.RLock()
+	defer pc.mutex.RUnlock()
+
+	result, exists := pc.cache[tc]
+	return result, exists
+}
+
+// Set stores a result for the given price combination
+func (pc *PriceCache) Set(tc TriangleCache, result ArbitrageResult) {
+	pc.mutex.Lock()
+	defer pc.mutex.Unlock()
+
+	// Simple size limit to prevent memory leaks
+	const maxCacheSize = 1000
+	if len(pc.cache) >= maxCacheSize {
+		// Clear half the cache (simple cleanup strategy)
+		pc.clearOldestEntries(len(pc.cache) / 2)
 	}
 
-	if t.PathB.Direction == "BUY" {
-		middle = t.PathB.Pair.Quote
-	} else {
-		middle = t.PathB.Pair.Base
+	pc.cache[tc] = result
+}
+
+// clearOldestEntries removes the oldest entries from the cache
+func (pc *PriceCache) clearOldestEntries(count int) {
+	// Simple strategy: remove random entries
+	// In a production system, you might want to implement LRU
+	removed := 0
+	for tc := range pc.cache {
+		if removed >= count {
+			break
+		}
+		delete(pc.cache, tc)
+		removed++
+	}
+}
+
+// Size returns the current cache size
+func (pc *PriceCache) Size() int {
+	pc.mutex.RLock()
+	defer pc.mutex.RUnlock()
+	return len(pc.cache)
+}
+
+// GetCacheStats returns cache statistics for debugging
+func (t *Triangle) GetCacheStats() map[string]any {
+	if t.priceCache == nil {
+		return map[string]any{
+			"cache_size":        0,
+			"cache_initialized": false,
+		}
 	}
 
-	if t.PathC.Direction == "BUY" {
-		end = t.PathC.Pair.Quote
-	} else {
-		end = t.PathC.Pair.Base
+	return map[string]any{
+		"cache_size":        t.priceCache.Size(),
+		"cache_initialized": true,
 	}
-
-	return fmt.Sprintf("[%s -> %s -> %s] %s -> %s -> %s -> %s", t.PathA.Pair.String(), t.PathB.Pair.String(), t.PathC.Pair.String(), start, middle, end, start)
 }
 
 type Path struct {
-	Pair       currency.Pair
-	BookTicker *BookTicker
-	Direction  string // Buy or sell
+	Pair      currency.Pair
+	bookData  atomic.Value // *BookTicker
+	Direction string       // Buy or sell
 }
 
-func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err error) {
+func (p *Path) SetBookTicker(book *BookTicker) {
+	newBook := &BookTicker{
+		BidPrice: book.BidPrice,
+		BidQty:   book.BidQty,
+		AskPrice: book.AskPrice,
+		AskQty:   book.AskQty,
+		UpdateID: book.UpdateID,
+	}
+	p.bookData.Store(newBook)
+}
+
+func (p *Path) GetBookTicker() *BookTicker {
+	if v := p.bookData.Load(); v != nil {
+		return v.(*BookTicker)
+	}
+	return nil
+}
+
+func (t *Triangle) updateTriangle(ob *Orderbook) error {
+	t.Lock.L.Lock()
+	defer t.Lock.L.Unlock()
+
+	err := t.TryExecuteTriangle(ob)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (t *Triangle) TryExecuteTriangle(ob *Orderbook) error {
+	if t.OnCooldown {
+		return nil
+	}
+
+	found, profit, err := t.TestArbitrage(ob)
+	if err != nil {
+		return err
+	}
+
+	// logger.InfoFmt("Triangle %s simulated. Profit: %g USDC", t, profit)
+
+	if found && profit > 1.001 && profit < 1.8 {
+		t.Locked = true
+		t.Lock.L.Lock()
+		defer func() {
+			t.Locked = false
+			t.Lock.L.Unlock()
+			t.Lock.Broadcast()
+		}()
+		logger.InfoFmt("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
+		if !ob.Config.SimulationMode {
+			onCooldown, err := t.Execute(ob, ob.Config.OrderUSDCAmount)
+			if err != nil {
+				return err
+			}
+			if onCooldown {
+				logger.WarningFmt("Triangle %s LOCKED from executing trades.", t.String())
+				return fmt.Errorf("triangle %s on cooldown", t.String())
+			}
+		} else {
+			log.Info().Str("triangle", t.String()).Msgf("%s", logger.Yellow("Would execute triangle if in LIVE mode."))
+			ob.TradeLogger.Info().
+				Str("triangle", t.String()).
+				Float64("profit", profit).
+				Msgf("Executed triangle %s for profit %g", t.String(), profit)
+
+			// Lock the triangle to simulate LIVE mode behavior
+			t.Cooldown(10)
+		}
+	}
+
+	return nil
+}
+
+func (t *Triangle) CheckArbitrage(ob *Orderbook, fee float64) (found bool, profit float64, err error) {
 	t.Lock.L.Lock()
 	defer t.Lock.L.Unlock()
 	if t.Locked {
@@ -63,33 +234,61 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 
 	f, err := udecimal.NewFromFloat64(fee)
 	if err != nil {
-		log.Warn().Err(err).Msg("Error parsing fee. Using default fee of 0.001 (1%)")
+		logger.Warning("Error parsing fee. Using default fee of 0.001 (1%)")
 		f = udecimal.MustParse("0.001")
+	}
+
+	// Get current price data from orderbook
+	symbolA, ok := ob.Symbols.Get(t.PathA.Pair.String())
+	if !ok {
+		return false, 0, fmt.Errorf("symbol %s not found in orderbook", t.PathA.Pair.String())
+	}
+	bookA := symbolA.GetBookTicker()
+	if bookA == nil {
+		return false, 0, fmt.Errorf("no price data available for %s", t.PathA.Pair.String())
+	}
+
+	symbolB, ok := ob.Symbols.Get(t.PathB.Pair.String())
+	if !ok {
+		return false, 0, fmt.Errorf("symbol %s not found in orderbook", t.PathB.Pair.String())
+	}
+	bookB := symbolB.GetBookTicker()
+	if bookB == nil {
+		return false, 0, fmt.Errorf("no price data available for %s", t.PathB.Pair.String())
+	}
+
+	symbolC, ok := ob.Symbols.Get(t.PathC.Pair.String())
+	if !ok {
+		return false, 0, fmt.Errorf("symbol %s not found in orderbook", t.PathC.Pair.String())
+	}
+	bookC := symbolC.GetBookTicker()
+	if bookC == nil {
+		return false, 0, fmt.Errorf("no price data available for %s", t.PathC.Pair.String())
 	}
 
 	// Parse prices based on direction
 	if t.PathA.Direction == "SELL" {
-		priceA, err = udecimal.Parse(t.PathA.BookTicker.BidPrice)
+		priceA, err = udecimal.Parse(bookA.BidPrice)
 	} else {
-		priceA, err = udecimal.Parse(t.PathA.BookTicker.AskPrice)
+		priceA, err = udecimal.Parse(bookA.AskPrice)
 	}
 	if err != nil {
 		return false, 0, err
 	}
 
 	if t.PathB.Direction == "SELL" {
-		priceB, err = udecimal.Parse(t.PathB.BookTicker.BidPrice)
+		priceB, err = udecimal.Parse(bookB.BidPrice)
 	} else {
-		priceB, err = udecimal.Parse(t.PathB.BookTicker.AskPrice)
+		priceB, err = udecimal.Parse(bookB.AskPrice)
 	}
 	if err != nil {
 		return false, 0, err
 	}
 
 	if t.PathC.Direction == "SELL" {
-		priceC, err = udecimal.Parse(t.PathC.BookTicker.BidPrice)
+		priceC, err = udecimal.Parse(bookC.BidPrice)
 	} else {
-		priceC, err = udecimal.Parse(t.PathC.BookTicker.AskPrice)
+		priceC, err = udecimal.Parse(bookC.AskPrice)
 	}
 	if err != nil {
 		return false, 0, err
@@ -143,6 +342,211 @@ func (t *Triangle) CheckArbitrage(fee float64) (found bool, profit float64, err 
 	return
 }
 
+func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64, err error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	initialAmount := ob.Config.OrderUSDCAmount
+	amount := initialAmount
+	paths := [3]*Path{t.PathA, t.PathB, t.PathC}
+	for _, p := range paths {
+		s, ok := ob.Symbols.Get(p.Pair.String())
+		if !ok {
+			return false, 0, fmt.Errorf("symbol %s not found in orderbook", p.Pair.String())
+		}
+
+		// Get current price data from the orderbook instead of using cached data
+		currentBookTicker := s.GetBookTicker()
+		if currentBookTicker == nil {
+			return false, 0, fmt.Errorf("no price data available for %s", p.Pair.String())
+		}
+
+		executedQty, quoteQty, err := p.simulatePathWithBookTicker(ob, s, amount, currentBookTicker)
+		if ob.Config.VerboseLogging {
+			logger.DebugFmt("Simulated path %s %s with amount %g: executedQty %g - quoteQty %g (Ask: %s, Bid: %s)",
+				p.Direction, p.Pair.String(), amount, executedQty, quoteQty,
+				currentBookTicker.AskPrice, currentBookTicker.BidPrice)
+		}
+		if err != nil {
+			return false, 0, err
+		}
+
+		if p.Direction == "BUY" {
+			amount = executedQty
+		} else {
+			amount = quoteQty
+		}
+
+		// Debug: Log intermediate amounts
+		if ob.Config.VerboseLogging {
+			logger.DebugFmt("Triangle %s after path %s: amount=%g", t, p.Pair.String(), amount)
+		}
+	}
+
+	if amount >= initialAmount {
+		found = true
+	}
+	profit = amount - initialAmount
+
+	// Debug: Log the final calculation details
+	if ob.Config.VerboseLogging {
+		logger.DebugFmt("Triangle %s FINAL CALC: initialAmount=%g, finalAmount=%g, profit=%g",
+			t, initialAmount, amount, profit)
+	}
+
+	return
+}
+
+// TestArbitrage checks for arbitrage opportunities using price-based caching
+func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err error) {
+	// Initialize cache if not exists
+	if t.priceCache == nil {
+		t.priceCache = NewPriceCache()
+	}
+
+	// Get current prices for all three paths
+	paths := [3]*Path{t.PathA, t.PathB, t.PathC}
+	var priceTuples [3]PriceTuple
+
+	for i, p := range paths {
+		s, ok := ob.Symbols.Get(p.Pair.String())
+		if !ok {
+			return false, 0, fmt.Errorf("symbol %s not found in orderbook", p.Pair.String())
+		}
+
+		currentBookTicker := s.GetBookTicker()
+		if currentBookTicker == nil {
+			return false, 0, fmt.Errorf("no price data available for %s", p.Pair.String())
+		}
+
+		priceTuples[i] = PriceTuple{
+			Ask: currentBookTicker.AskPrice,
+			Bid: currentBookTicker.BidPrice,
+		}
+	}
+
+	// Create cache key
+	tc := TriangleCache{
+		SymbolA: priceTuples[0],
+		SymbolB: priceTuples[1],
+		SymbolC: priceTuples[2],
+	}
+
+	// Check cache first
+	if result, exists := t.priceCache.Get(tc); exists {
+		zero := float64(0)
+		thousand := float64(1000)
+		logger.DebugFmt(
+			"Triangle %s using %s result. Profit: %g USDC (Cache size: %s)",
+			t,
+			logger.Green("CACHED"),
+			result.profit,
+			logger.ColorizeNumber(float64(t.priceCache.Size()), &zero, &thousand),
+		)
+		// if ob.Config.VerboseLogging {
+		// }
+		return result.found, result.profit, result.err
+	}
+
+	// Debug: Log cache key details
+	zero := float64(0)
+	thousand := float64(1000)
+	if ob.Config.VerboseLogging {
+		logger.DebugFmt("Triangle %s cache MISS. Key: A[%s/%s] B[%s/%s] C[%s/%s] (Cache size: %s)",
+			t,
+			tc.SymbolA.Ask, tc.SymbolA.Bid,
+			tc.SymbolB.Ask, tc.SymbolB.Bid,
+			tc.SymbolC.Ask, tc.SymbolC.Bid,
+			logger.ColorizeNumber(float64(t.priceCache.Size()), &zero, &thousand))
+	}
+
+	// Calculate new result
+	found, profit, err = t.SimulateArbitrage(ob)
+
+	// Cache the result
+	t.priceCache.Set(tc, ArbitrageResult{
+		found:  found,
+		profit: profit,
+		err:    err,
+	})
+
+	logger.DebugFmt("Triangle %s %s new result. Profit: %g USDC (Cache size: %s)", t, logger.Blue("CALCULATED"), profit, logger.ColorizeNumber(float64(t.priceCache.Size()), &zero, &thousand))
+	// if ob.Config.VerboseLogging {
+	// }
+
+	return found, profit, err
+}
+
+func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQty, quoteQty float64, err error) {
+	fee := ob.Config.FeeRate
+	var quantity, price float64
+
+	if p.Direction == "BUY" {
+		priceStr := p.GetBookTicker().AskPrice
+		price, err = strconv.ParseFloat(priceStr, 64)
+		if err != nil {
+			return
+		}
+		quantity = amount / price
+	} else {
+		priceStr := p.GetBookTicker().BidPrice
+		price, err = strconv.ParseFloat(priceStr, 64)
+		if err != nil {
+			return
+		}
+		quantity = amount
+	}
+
+	if ob.Config.VerboseLogging {
+		logger.DebugFmt("symbol: %s, price: %f, quantity: %f", s.Pair, price, quantity)
+	}
+
+	newQty, err := stepSizeQuantityFloat(s, quantity)
+	if err != nil {
+		return
+	}
+
+	executedQty = newQty
+	quoteQty = executedQty * price * (1 - fee)
+
+	return
+}
+
+func (p *Path) simulatePathWithBookTicker(ob *Orderbook, s *Symbol, amount float64, bookTicker *BookTicker) (executedQty, quoteQty float64, err error) {
+	fee := ob.Config.FeeRate
+	var quantity, price float64
+
+	if p.Direction == "BUY" {
+		priceStr := bookTicker.AskPrice
+		price, err = strconv.ParseFloat(priceStr, 64)
+		if err != nil {
+			return
+		}
+		quantity = amount / price
+	} else {
+		priceStr := bookTicker.BidPrice
+		price, err = strconv.ParseFloat(priceStr, 64)
+		if err != nil {
+			return
+		}
+		quantity = amount
+	}
+
+	if ob.Config.VerboseLogging {
+		logger.DebugFmt("symbol: %s, price: %f, quantity: %f", s.Pair, price, quantity)
+	}
+
+	newQty, err := stepSizeQuantityFloat(s, quantity)
+	if err != nil {
+		return
+	}
+
+	executedQty = newQty
+	quoteQty = executedQty * price * (1 - fee)
+
+	return
+}
+
 func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, err error) {
 	if t.OnCooldown {
 		return true, nil
@@ -168,7 +572,7 @@ func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, e
 	currentAmount := res.ExecutedQty
 	for i, p := range paths {
 		symbol, _ := ob.Symbols.Get(p.Pair.String())
-		response, err := executePath(ob.Client, &prevSymbol, &prevPath, symbol, p, currentAmount)
+		response, err := tryExecutePathWithRollback(ob.Client, &prevSymbol, &prevPath, symbol, p, currentAmount)
 		if err != nil {
 			return false, err
 		}
@@ -220,63 +624,44 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 	var priceString string
 	var quantity udecimal.Decimal
 	var logAmount float64
+	var baseQty, quoteQty float64
 
 	if p.Direction == "BUY" {
-		priceString = p.BookTicker.AskPrice
-		// For BUY orders: quantity = amount / price
+		priceString = p.GetBookTicker().AskPrice
 		price, err := udecimal.Parse(priceString)
 		if err != nil {
 			return nil, err
 		}
+		// For BUY orders: quantity = amount / price
 		quantity, err = udecimal.MustFromFloat64(amount).Div(price)
 		if err != nil {
 			return nil, err
 		}
 		logAmount = amount
+		quoteQty = logAmount
+		baseQty = quantity.InexactFloat64()
 	} else {
-		priceString = p.BookTicker.BidPrice
+		priceString = p.GetBookTicker().BidPrice
 		quantity = udecimal.MustFromFloat64(amount)
 		logAmount = quantity.Mul(udecimal.MustParse(priceString)).InexactFloat64()
+		quoteQty = logAmount
+		baseQty = amount
 	}
 
-	log.Info().Str("symbol", symbol.Pair.String()).Float64("amount", amount).
-		Msgf("%sing %s %s for %g %s", p.Direction, quantity, logger.Cyan(p.Pair.Base.String()), logAmount, logger.Cyan(p.Pair.Quote.String()))
+	log.Info().
+		Str("symbol", symbol.Pair.String()).
+		Float64("quoteQty", quoteQty).
+		Float64("baseQty", baseQty).
+		Str("price", priceString).
+		Msgf("%sing %s %s for %g %s - price: %s", p.Direction, quantity, logger.Cyan(p.Pair.Base.String()), logAmount, logger.Cyan(p.Pair.Quote.String()), priceString)
 
-	stepSize, err := udecimal.Parse(symbol.Filter.LotSize.StepSize)
+	newQty, err := stepSizeQuantity(symbol, quantity)
 	if err != nil {
 		return nil, err
 	}
 
-	minQty, err := udecimal.Parse(symbol.Filter.LotSize.MinQty)
-	if err != nil {
+	if ok, err := checkQtyAndNotional(symbol, newQty, priceString); !ok {
 		return nil, err
-	}
-
-	lots, err := quantity.Div(stepSize)
-	if err != nil {
-		return nil, err
-	}
-	lots = lots.Trunc(0)
-	newQty := lots.Mul(stepSize)
-
-	// Check minimum quantity
-	if newQty.Cmp(minQty) < 0 {
-		return nil, fmt.Errorf("quantity %s is smaller than minimum %s", newQty, minQty)
-	}
-
-	minNotional, err := udecimal.Parse(symbol.Filter.MinNotional)
-	if err != nil {
-		return nil, err
-	}
-
-	price, err := udecimal.Parse(priceString)
-	if err != nil {
-		return nil, err
-	}
-
-	notional := price.Mul(newQty)
-	if minNotional.Cmp(notional) > 0 {
-		return nil, fmt.Errorf("order notional %s is smaller than %s", notional, minNotional)
 	}
 
 	qty, err := strconv.ParseFloat(newQty.StringFixed(uint8(symbol.BasePrecision)), 64)
@@ -289,7 +674,65 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 	return
 }
 
-func executePath(client *binance.Client, prevSymbol *Symbol, prevPath *Path, symbol *Symbol, path *Path, amount string) (*binance.CreateOrderResponseFULL, error) {
+func checkQtyAndNotional(symbol *Symbol, quantity udecimal.Decimal, price string) (ok bool, err error) {
+	// Check minimum quantity
+	minQty, err := udecimal.Parse(symbol.Filter.LotSize.MinQty)
+	if err != nil {
+		return false, err
+	}
+	if quantity.Cmp(minQty) < 0 {
+		return false, fmt.Errorf("quantity %s is smaller than minimum %s", quantity, minQty)
+	}
+
+	priceDecimal, err := udecimal.Parse(price)
+	if err != nil {
+		return false, err
+	}
+
+	// Check notional
+	minNotional, err := udecimal.Parse(symbol.Filter.MinNotional)
+	if err != nil {
+		return false, err
+	}
+	notional := priceDecimal.Mul(quantity)
+	if minNotional.Cmp(notional) > 0 {
+		return false, fmt.Errorf("notional %s is smaller than minimum %s", notional, minNotional)
+	}
+
+	return true, nil
+}
+
+func stepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decimal, error) {
+	stepSize, err := udecimal.Parse(symbol.Filter.LotSize.StepSize)
+	if err != nil {
+		return udecimal.Decimal{}, err
+	}
+
+	lots, err := quantity.Div(stepSize)
+	if err != nil {
+		return udecimal.Decimal{}, err
+	}
+
+	lots = lots.Trunc(0)
+	newQty := lots.Mul(stepSize)
+
+	return newQty, nil
+}
+
+func stepSizeQuantityFloat(symbol *Symbol, quantity float64) (float64, error) {
+	stepSize, err := strconv.ParseFloat(symbol.Filter.LotSize.StepSize, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	lots := float64(int(quantity / stepSize))
+
+	newQty := lots * stepSize
+
+	return newQty, nil
+}
+
+func tryExecutePathWithRollback(client *binance.Client, prevSymbol *Symbol, prevPath *Path, symbol *Symbol, path *Path, amount string) (*binance.CreateOrderResponseFULL, error) {
 	// Second trade (first coin -> second coin)
 	prevAmount, err := strconv.ParseFloat(amount, 64)
 	if err != nil {
@@ -302,7 +745,7 @@ func executePath(client *binance.Client, prevSymbol *Symbol, prevPath *Path, sym
 		var realAmount udecimal.Decimal
 		if path.Direction == "BUY" {
 			amB := udecimal.MustFromFloat64(prevAmount)
-			bid := udecimal.MustParse(path.BookTicker.BidPrice)
+			bid := udecimal.MustParse(path.GetBookTicker().BidPrice)
 			realAmount, err = amB.Div(bid)
 			if err != nil {
 				return nil, err
@@ -340,7 +783,7 @@ func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
 	}
 
 	if p.Direction == "BUY" {
-		priceString := p.BookTicker.AskPrice
+		priceString := p.GetBookTicker().AskPrice
 		price, err := udecimal.Parse(priceString)
 		if err != nil {
 			return false, err
@@ -357,14 +800,4 @@ func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
 	}
 
 	return true, nil
-}
-
-func TestArbitrage() Triangle {
-	triangle := Triangle{
-		PathA: &Path{Pair: currency.DOT_USDC, Direction: "SELL"},
-		PathB: &Path{Pair: currency.DOT_BTC, Direction: "BUY"},
-		PathC: &Path{Pair: currency.BTC_USDC, Direction: "SELL"},
-	}
-
-	return triangle
 }

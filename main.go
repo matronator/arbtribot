@@ -6,8 +6,11 @@ import (
 	"arbtribot/logger"
 	"arbtribot/utils"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	binance "github.com/binance/binance-connector-go"
@@ -85,29 +88,55 @@ func main() {
 		symbols = append(symbols, symbol.Key)
 	}
 
-	// chunk := symbols[0:20]
-	// ConnectToExchange(chunk, OrderBook)
+	websocketStreamClient := binance.NewWebsocketStreamClient(true)
+	handler := NewBookTickerHandler(OrderBook)
 
-	chunkSize := 100
+	chunkSize := 150
 	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+	errCh := make(chan error)
+
 	for i := 0; i < len(symbols); i += chunkSize {
 		end := min(i+chunkSize, len(symbols))
-
 		chunk := symbols[i:end]
+
 		wg.Add(1)
 		go func(symbolsChunk []string) {
 			defer wg.Done()
-			ConnectToExchange(symbolsChunk, OrderBook)
+			doneCh, stop, err := websocketStreamClient.WsCombinedBookTickerServe(
+				symbolsChunk,
+				handler.HandleBookTickerEvent,
+				handler.HandleError,
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			// Wait for stop signal
+			select {
+			case <-stopCh:
+				stop <- struct{}{}
+			case <-doneCh:
+				return
+			}
 		}(chunk)
 	}
 
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for either an error or an interrupt signal
+	select {
+	case err := <-errCh:
+		logger.Error(err)
+		close(stopCh) // Signal all goroutines to stop
+	case <-quitChannel:
+		logger.InfoFmt("Received interrupt signal. Closing connections...")
+		close(stopCh) // Signal all goroutines to stop
+	}
+
 	wg.Wait()
-
-	// go loop(triangles, OrderBook)
-
-	// quitChannel := make(chan os.Signal, 1)
-	// signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
-	// <-quitChannel
 
 	defer func() {
 		logger.InfoFmt("Bot is shutting down...")
@@ -119,7 +148,7 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 	for {
 		opportunities := make([]*arbitrage.Triangle, 0)
 		for _, triangle := range triangles {
-			found, profit, err := triangle.CheckArbitrage(cfg.FeeRate)
+			found, profit, err := triangle.CheckArbitrage(ob, cfg.FeeRate)
 			if err != nil {
 				logger.Error(err)
 				continue

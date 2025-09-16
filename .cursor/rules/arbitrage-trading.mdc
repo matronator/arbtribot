@@ -1,0 +1,176 @@
+---
+description: Arbitrage trading specific patterns and best practices
+---
+
+# Arbitrage Trading Patterns
+
+## Triangle Arbitrage Concepts
+
+### Triangle Structure
+A triangle arbitrage consists of three sequential trades that form a closed loop:
+1. **Path A**: Start currency → Intermediate currency
+2. **Path B**: Intermediate currency → Second intermediate currency  
+3. **Path C**: Second intermediate currency → Start currency
+
+Example: USDC → BTC → ETH → USDC
+
+### Path Direction
+- **BUY**: Convert quote currency to base currency (spend quote, get base)
+- **SELL**: Convert base currency to quote currency (spend base, get quote)
+
+### Price Selection
+- **BUY orders**: Use AskPrice (market maker price)
+- **SELL orders**: Use BidPrice (market taker price)
+
+## Trading Execution Patterns
+
+### Atomic Execution
+- All three trades must succeed or all must be rolled back
+- Use rollback mechanism for failed intermediate trades
+- Implement proper error handling for each trade step
+- Log all relevant information at each trade step (current price, profit, etc)
+
+### Quantity Validation
+- Always validate against exchange filters:
+  - `LotSize.MinQty` - Minimum quantity
+  - `LotSize.StepSize` - Quantity step size
+  - `MinNotional` - Minimum notional value
+  - `MarketLotSize.MaxQty` - Maximum market quantity
+
+### Step Size Compliance
+```go
+// Round quantity to valid step size
+func stepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decimal, error) {
+    stepSize, err := udecimal.Parse(symbol.Filter.LotSize.StepSize)
+    if err != nil {
+        return udecimal.Decimal{}, err
+    }
+    
+    lots, err := quantity.Div(stepSize)
+    if err != nil {
+        return udecimal.Decimal{}, err
+    }
+    
+    lots = lots.Trunc(0)
+    return lots.Mul(stepSize), nil
+}
+```
+
+## Profit Calculation
+
+### Fee Integration
+- Apply trading fees at each step: `amount * (1 - feeRate)`
+- Use decimal arithmetic for precise calculations except for simulation
+- For simulation, use regular floats for maximum performance
+- Account for both maker and taker fees
+
+### Arbitrage Detection
+
+#### Decimal version (uses percentages)
+
+```go
+// Check if arbitrage opportunity exists
+if product.Cmp(udecimal.MustParse("1")) >= 1 {
+    found = true
+}
+profit = product.InexactFloat64()
+```
+
+#### Faster float64 version (uses real USDC amounts)
+
+```go
+if amount >= initialAmount {
+    found = true
+}
+profit = amount - initialAmount
+```
+
+### Minimum Profit Thresholds
+- Set minimum profit thresholds (e.g., 1.05% = 0.0105)
+- Consider network fees and slippage
+- Account for market volatility
+
+## Risk Management
+
+### Cooldown Mechanisms
+- Implement triangle cooldowns to prevent rapid re-execution
+- Use goroutines for non-blocking cooldown timers
+- Lock triangles during execution to prevent conflicts
+
+### Balance Validation
+- Check account balances before execution
+- Validate sufficient funds for all three trades
+- Handle insufficient balance gracefully
+
+### Market Conditions
+- Monitor price updates via websockets
+- Get only the market price (BestBidPrice, BestAskPrice) without deeper order book levels
+- Check for market lot size constraints
+
+## Order Book Management
+
+### Real-time Updates
+- Use WebSocket streams for live price feeds
+- Implement atomic updates for thread safety
+- Handle connection drops and reconnections
+
+### Price Validation
+- Verify price changes before processing
+- Skip updates with identical prices
+- Log significant price movements
+
+### Symbol Management
+- Maintain concurrent map of active symbols
+- Track last update timestamps
+- Handle symbol additions/removals dynamically
+
+## Configuration Patterns
+
+### Environment Variables
+- Use `.env` file for sensitive configuration
+- Provide sensible defaults for all settings
+- Validate configuration on startup
+
+### Simulation Mode
+- Always default to simulation mode for safety
+- Provide clear logging for simulation vs live trading
+- Implement identical logic for both modes
+
+### Fee Management
+- Make fee rates configurable
+- Support different fee structures
+- Account for maker/taker differences
+
+## Error Handling in Trading
+
+### Trade Execution Errors
+- Implement comprehensive rollback mechanisms
+- Log all trade attempts and failures
+- Provide detailed error context
+
+### Network Errors
+- Handle WebSocket disconnections gracefully
+- Implement retry logic with exponential backoff
+- Fail fast on critical errors
+
+### Exchange Errors
+- Parse and handle exchange-specific error codes
+- Implement rate limiting and backoff
+- Monitor API quota usage
+
+## Performance Considerations
+
+### Concurrent Processing
+- Use goroutines for parallel triangle checking
+- Implement worker pools for trade execution
+- Balance CPU usage with memory consumption
+
+### Memory Management
+- Use atomic values for lock-free operations
+- Implement proper cleanup for goroutines
+- Monitor memory usage in long-running processes
+
+### Database Operations
+- Cache frequently accessed data
+- Use efficient data structures (concurrent maps)
+- Minimize allocations in hot paths
