@@ -69,10 +69,12 @@ func (h *BookTickerHandler) HandleBookTickerEvent(event *binance.WsBookTickerEve
 		}
 
 		// Debug: Log price updates
-		logger.DebugFmt("Updated %s: Ask=%s, Bid=%s", event.Symbol, bookCopy.AskPrice, bookCopy.BidPrice)
+		if h.orderbook.Config.VerboseLogging {
+			logger.DebugFmt("Updated %s: Ask=%s, Bid=%s", event.Symbol, bookCopy.AskPrice, bookCopy.BidPrice)
+		}
 
 		return
 	}
 
-	logger.InfoFmt("Symbol %s not found.", event.Symbol)
+	logger.WarningFmt("Symbol %s not found.", event.Symbol)
 }

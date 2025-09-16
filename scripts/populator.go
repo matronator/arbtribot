@@ -24,11 +24,11 @@ func main() {
 	// }
 	// defer file.Close()
 
-	ethFile, err := os.OpenFile("pairs_eth.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		panic(err)
-	}
-	defer ethFile.Close()
+	// ethFile, err := os.OpenFile("pairs_eth.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer ethFile.Close()
 
 	// btcFile, err := os.OpenFile("pairs_btc.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	// if err != nil {
@@ -54,7 +54,7 @@ func main() {
 	// }
 	// defer eurFile.Close()
 
-	err = godotenv.Load(".env")
+	err := godotenv.Load(".env")
 	if err != nil {
 		panic("Error loading .env file")
 	}
@@ -131,11 +131,11 @@ func GetTickers(apiKey string, apiSecret string) (ticker *binance.ExchangeInfoRe
 
 	client := binance.NewClient(apiKey, apiSecret, baseURL)
 
-	res, err2 := client.NewExchangeInfoService().Do(context.Background())
-	if err2 != nil {
-		fmt.Println(err2)
-		return nil, err2
+	ticker, err = client.NewExchangeInfoService().Do(context.Background())
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
 	}
 
-	return res, nil
+	return
 }

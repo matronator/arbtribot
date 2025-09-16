@@ -29,19 +29,20 @@ type Symbol struct {
 	BasePrecision  int8
 	QuotePrecision int8
 	Filter         ExchangeFilter
-	bookData       atomic.Value // *BookTicker
+	bookData       atomic.Value // BookTicker
 	LastUpdated    time.Time
 	Triangles      []*Triangle
-	Lock           *sync.Mutex
+	Lock           sync.Mutex
 }
 
 func (s *Symbol) SetBookTicker(book *BookTicker) {
-	s.bookData.Store(book)
+	s.bookData.Store(*book)
 }
 
 func (s *Symbol) GetBookTicker() *BookTicker {
 	if v := s.bookData.Load(); v != nil {
-		return v.(*BookTicker)
+		book := v.(BookTicker)
+		return &book
 	}
 	return nil
 }
@@ -215,13 +216,12 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 
 					// Don't set BookTicker here - it will be fetched fresh during simulation
 
-					lock := sync.NewCond(&sync.Mutex{})
 					triangle := &Triangle{
 						PathA:      path1,
 						PathB:      path2,
 						PathC:      path3,
 						OnCooldown: false,
-						Lock:       lock,
+						Lock:       sync.Cond{L: &sync.Mutex{}},
 						mu:         sync.RWMutex{},
 						priceCache: NewPriceCache(),
 					}
@@ -314,7 +314,7 @@ func FillOrderBook(client *binance.Client, cfg *utils.Config, tradeLogger *zerol
 			BasePrecision:  int8(symbol.BaseAssetPrecision),
 			QuotePrecision: int8(symbol.QuoteAssetPrecision),
 			Filter:         f,
-			Lock:           &sync.Mutex{},
+			Lock:           sync.Mutex{},
 		}
 
 		ob.Add(&s)

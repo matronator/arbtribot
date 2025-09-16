@@ -103,6 +103,7 @@ func main() {
 		wg.Add(1)
 		go func(symbolsChunk []string) {
 			defer wg.Done()
+			logger.InfoFmt("Starting websocket stream for %d symbols.", len(symbolsChunk))
 			doneCh, stop, err := websocketStreamClient.WsCombinedBookTickerServe(
 				symbolsChunk,
 				handler.HandleBookTickerEvent,
@@ -122,6 +123,9 @@ func main() {
 			}
 		}(chunk)
 	}
+
+	time.Sleep(time.Millisecond * 15)
+	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Looking for arbitrage opportunities...")))
 
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)

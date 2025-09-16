@@ -15,35 +15,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type PriceTuple struct {
-	Ask string
-	Bid string
-}
-
-type TriangleCache struct {
-	SymbolA PriceTuple
-	SymbolB PriceTuple
-	SymbolC PriceTuple
-}
-
-type ArbitrageResult struct {
-	found  bool
-	profit float64
-	err    error
-}
-
-type PriceCache struct {
-	cache map[TriangleCache]ArbitrageResult
-	mutex sync.RWMutex
-}
-
 type Triangle struct {
 	PathA      *Path
 	PathB      *Path
 	PathC      *Path
 	OnCooldown bool
 	Locked     bool
-	Lock       *sync.Cond
+	Lock       sync.Cond
 	mu         sync.RWMutex
 
 	// Price-based caching
@@ -51,105 +29,17 @@ type Triangle struct {
 }
 
 func (t *Triangle) String() string {
-	// var start, middle, end currency.Currency
-	// if t.PathA.Direction == "BUY" {
-	// 	start = t.PathA.Pair.Quote
-	// } else {
-	// 	start = t.PathA.Pair.Base
-	// }
-
-	// if t.PathB.Direction == "BUY" {
-	// 	middle = t.PathB.Pair.Quote
-	// } else {
-	// 	middle = t.PathB.Pair.Base
-	// }
-
-	// if t.PathC.Direction == "BUY" {
-	// 	end = t.PathC.Pair.Quote
-	// } else {
-	// 	end = t.PathC.Pair.Base
-	// }
-
 	return fmt.Sprintf("[%s -> %s -> %s]", t.PathA.Pair.String(), t.PathB.Pair.String(), t.PathC.Pair.String())
-	// return fmt.Sprintf("[%s -> %s -> %s] %s -> %s -> %s -> %s", t.PathA.Pair.String(), t.PathB.Pair.String(), t.PathC.Pair.String(), start, middle, end, start)
-}
-
-// NewPriceCache creates a new price cache with size limit
-func NewPriceCache() *PriceCache {
-	return &PriceCache{
-		cache: make(map[TriangleCache]ArbitrageResult),
-		mutex: sync.RWMutex{},
-	}
-}
-
-// Get retrieves a cached result for the given price combination
-func (pc *PriceCache) Get(tc TriangleCache) (ArbitrageResult, bool) {
-	pc.mutex.RLock()
-	defer pc.mutex.RUnlock()
-
-	result, exists := pc.cache[tc]
-	return result, exists
-}
-
-// Set stores a result for the given price combination
-func (pc *PriceCache) Set(tc TriangleCache, result ArbitrageResult) {
-	pc.mutex.Lock()
-	defer pc.mutex.Unlock()
-
-	// Simple size limit to prevent memory leaks
-	const maxCacheSize = 1000
-	if len(pc.cache) >= maxCacheSize {
-		// Clear half the cache (simple cleanup strategy)
-		pc.clearOldestEntries(len(pc.cache) / 2)
-	}
-
-	pc.cache[tc] = result
-}
-
-// clearOldestEntries removes the oldest entries from the cache
-func (pc *PriceCache) clearOldestEntries(count int) {
-	// Simple strategy: remove random entries
-	// In a production system, you might want to implement LRU
-	removed := 0
-	for tc := range pc.cache {
-		if removed >= count {
-			break
-		}
-		delete(pc.cache, tc)
-		removed++
-	}
-}
-
-// Size returns the current cache size
-func (pc *PriceCache) Size() int {
-	pc.mutex.RLock()
-	defer pc.mutex.RUnlock()
-	return len(pc.cache)
-}
-
-// GetCacheStats returns cache statistics for debugging
-func (t *Triangle) GetCacheStats() map[string]any {
-	if t.priceCache == nil {
-		return map[string]any{
-			"cache_size":        0,
-			"cache_initialized": false,
-		}
-	}
-
-	return map[string]any{
-		"cache_size":        t.priceCache.Size(),
-		"cache_initialized": true,
-	}
 }
 
 type Path struct {
 	Pair      currency.Pair
-	bookData  atomic.Value // *BookTicker
+	bookData  atomic.Value // BookTicker
 	Direction string       // Buy or sell
 }
 
 func (p *Path) SetBookTicker(book *BookTicker) {
-	newBook := &BookTicker{
+	newBook := BookTicker{
 		BidPrice: book.BidPrice,
 		BidQty:   book.BidQty,
 		AskPrice: book.AskPrice,
@@ -161,15 +51,13 @@ func (p *Path) SetBookTicker(book *BookTicker) {
 
 func (p *Path) GetBookTicker() *BookTicker {
 	if v := p.bookData.Load(); v != nil {
-		return v.(*BookTicker)
+		book := v.(BookTicker)
+		return &book
 	}
 	return nil
 }
 
 func (t *Triangle) updateTriangle(ob *Orderbook) error {
-	t.Lock.L.Lock()
-	defer t.Lock.L.Unlock()
-
 	err := t.TryExecuteTriangle(ob)
 	if err != nil {
 		return err
@@ -190,7 +78,7 @@ func (t *Triangle) TryExecuteTriangle(ob *Orderbook) error {
 
 	// logger.InfoFmt("Triangle %s simulated. Profit: %g USDC", t, profit)
 
-	if found && profit > 1.001 && profit < 1.8 {
+	if found && profit > 0.5 {
 		t.Locked = true
 		t.Lock.L.Lock()
 		defer func() {
@@ -405,7 +293,6 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 	}
 
 	// Variables for colorizing cache size output
-	zero := float64(0)
 	thousand := float64(1000)
 
 	// Get current prices for all three paths
@@ -438,15 +325,15 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 
 	// Check cache first
 	if result, exists := t.priceCache.Get(tc); exists {
-		logger.DebugFmt(
-			"Triangle %s using %s result. Profit: %g USDC (Cache size: %s)",
-			t,
-			logger.Green("CACHED"),
-			result.profit,
-			logger.ColorizeNumber(float64(t.priceCache.Size()), &zero, &thousand),
-		)
-		// if ob.Config.VerboseLogging {
-		// }
+		if ob.Config.VerboseLogging {
+			logger.DebugFmt(
+				"Triangle %s using %s result. Profit: %g USDC (Cache size: %s)",
+				t,
+				logger.Green("CACHED"),
+				result.profit,
+				logger.ColorizeNumber(float64(t.priceCache.Size()), nil, &thousand),
+			)
+		}
 		return result.found, result.profit, result.err
 	}
 
@@ -470,9 +357,9 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 		err:    err,
 	})
 
-	logger.DebugFmt("Triangle %s %s new result. Profit: %g USDC (Cache size: %s)", t, logger.Blue("CALCULATED"), profit, logger.ColorizeNumber(float64(t.priceCache.Size()), nil, &thousand))
-	// if ob.Config.VerboseLogging {
-	// }
+	if ob.Config.VerboseLogging {
+		logger.DebugFmt("Triangle %s %s new result. Profit: %g USDC (Cache size: %s)", t, logger.Blue("CALCULATED"), profit, logger.ColorizeNumber(float64(t.priceCache.Size()), nil, &thousand))
+	}
 
 	return found, profit, err
 }
@@ -566,18 +453,18 @@ func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, e
 		return false, err
 	}
 
-	prevPath := *t.PathA
-	prevSymbol := *s
+	prevPath := t.PathA
+	prevSymbol := s
 	paths := [2]*Path{t.PathB, t.PathC}
 	currentAmount := res.ExecutedQty
 	for i, p := range paths {
 		symbol, _ := ob.Symbols.Get(p.Pair.String())
-		response, err := tryExecutePathWithRollback(ob.Client, &prevSymbol, &prevPath, symbol, p, currentAmount)
+		response, err := tryExecutePathWithRollback(ob.Client, prevSymbol, prevPath, symbol, p, currentAmount)
 		if err != nil {
 			return false, err
 		}
-		prevPath = *p
-		prevSymbol = *symbol
+		prevPath = p
+		prevSymbol = symbol
 
 		// For PathB to PathC transition, we need to check if the quote asset of PathB
 		// matches the base asset of PathC - if it does, use CummulativeQuoteQty
