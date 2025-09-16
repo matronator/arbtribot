@@ -382,13 +382,20 @@ func (ob *Orderbook) UpdatePrices() (updated int, err error) {
 
 	for _, symbol := range res {
 		if val, ok := ob.Symbols.Get(symbol.Symbol); ok {
-			if val.GetBookTicker().AskPrice != symbol.AskPrice || val.GetBookTicker().BidPrice != symbol.BidPrice {
+			bookTicker := val.GetBookTicker()
+			if bookTicker == nil || (bookTicker.AskPrice != symbol.AskPrice || bookTicker.BidPrice != symbol.BidPrice) {
+				var updateId int64
+				if bookTicker != nil {
+					updateId = bookTicker.UpdateID + 1
+				} else {
+					updateId = 0
+				}
 				book := &BookTicker{
 					AskPrice: symbol.AskPrice,
 					AskQty:   symbol.AskQty,
 					BidPrice: symbol.BidPrice,
 					BidQty:   symbol.BidQty,
-					UpdateID: val.GetBookTicker().UpdateID + 1,
+					UpdateID: updateId,
 				}
 
 				_, err := ob.UpdateBookTicker(symbol.Symbol, book)
@@ -423,13 +430,21 @@ func NewMarketOrder(client *binance.Client, pair *currency.Pair, dir string, qty
 
 func (s *Symbol) GetUSDPrice(ob *Orderbook) (string, error) {
 	if s.Pair.Quote.String() == "USDC" {
-		return s.GetBookTicker().AskPrice, nil
+		bookTicker := s.GetBookTicker()
+		if bookTicker == nil {
+			return "", fmt.Errorf("no book ticker data available for symbol %s", s.Pair.String())
+		}
+		return bookTicker.AskPrice, nil
 	}
 
 	c := s.Pair.Base.String()
 	symbol := c + "USDC"
 	if val, ok := ob.Symbols.Get(symbol); ok {
-		return val.GetBookTicker().AskPrice, nil
+		bookTicker := val.GetBookTicker()
+		if bookTicker == nil {
+			return "", fmt.Errorf("no book ticker data available for symbol %s", symbol)
+		}
+		return bookTicker.AskPrice, nil
 	}
 
 	for _, base := range currency.BaseCurrencies {
@@ -453,13 +468,21 @@ func checkSymbol(base string, quote string, ob *Orderbook) (string, error) {
 	symbol := base + quote
 	if val, ok := ob.Symbols.Get(symbol); ok {
 		quoteSymbol, _ := ob.Symbols.Get(quote + "USDC")
-		quotePriceS := quoteSymbol.GetBookTicker().AskPrice
+		bookTicker := quoteSymbol.GetBookTicker()
+		if bookTicker == nil {
+			return "", fmt.Errorf("no book ticker data available for symbol %s", quote+"USDC")
+		}
+		quotePriceS := bookTicker.AskPrice
 		quotePrice, err := udecimal.Parse(quotePriceS)
 		if err != nil {
 			return "", err
 		}
 
-		price, err := udecimal.Parse(val.GetBookTicker().AskPrice)
+		valBookTicker := val.GetBookTicker()
+		if valBookTicker == nil {
+			return "", fmt.Errorf("no book ticker data available for symbol %s", symbol)
+		}
+		price, err := udecimal.Parse(valBookTicker.AskPrice)
 		if err != nil {
 			return "", err
 		}

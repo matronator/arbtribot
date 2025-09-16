@@ -78,7 +78,7 @@ func (t *Triangle) TryExecuteTriangle(ob *Orderbook) error {
 
 	// logger.InfoFmt("Triangle %s simulated. Profit: %g USDC", t, profit)
 
-	if found && profit > 0.5 {
+	if found || profit > -0.5 {
 		t.Locked = true
 		t.Lock.L.Lock()
 		defer func() {
@@ -234,7 +234,7 @@ func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64,
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	initialAmount := ob.Config.OrderUSDCAmount
+	initialAmount := ob.Config.SimulationUSDCAmount
 	amount := initialAmount
 	paths := [3]*Path{t.PathA, t.PathB, t.PathC}
 	for _, p := range paths {
@@ -369,14 +369,24 @@ func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQ
 	var quantity, price float64
 
 	if p.Direction == "BUY" {
-		priceStr := p.GetBookTicker().AskPrice
+		bookTicker := p.GetBookTicker()
+		if bookTicker == nil {
+			err = fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
+			return
+		}
+		priceStr := bookTicker.AskPrice
 		price, err = strconv.ParseFloat(priceStr, 64)
 		if err != nil {
 			return
 		}
 		quantity = amount / price
 	} else {
-		priceStr := p.GetBookTicker().BidPrice
+		bookTicker := p.GetBookTicker()
+		if bookTicker == nil {
+			err = fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
+			return
+		}
+		priceStr := bookTicker.BidPrice
 		price, err = strconv.ParseFloat(priceStr, 64)
 		if err != nil {
 			return
@@ -440,7 +450,10 @@ func (t *Triangle) Execute(ob *Orderbook, usdAmount float64) (onCooldown bool, e
 	}
 
 	// First trade (USDC -> first coin)
-	s, _ := ob.Symbols.Get(t.PathA.Pair.String())
+	s, found := ob.Symbols.Get(t.PathA.Pair.String())
+	if !found {
+		return false, fmt.Errorf("symbol %s not found in orderbook", t.PathA.Pair.String())
+	}
 	underMaxQty, err := checkMarketLotSize(s, t.PathA, usdAmount)
 	if err != nil || !underMaxQty {
 		// rollback order
@@ -514,7 +527,11 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 	var baseQty, quoteQty float64
 
 	if p.Direction == "BUY" {
-		priceString = p.GetBookTicker().AskPrice
+		bookTicker := p.GetBookTicker()
+		if bookTicker == nil {
+			return nil, fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
+		}
+		priceString = bookTicker.AskPrice
 		price, err := udecimal.Parse(priceString)
 		if err != nil {
 			return nil, err
@@ -528,7 +545,11 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 		quoteQty = logAmount
 		baseQty = quantity.InexactFloat64()
 	} else {
-		priceString = p.GetBookTicker().BidPrice
+		bookTicker := p.GetBookTicker()
+		if bookTicker == nil {
+			return nil, fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
+		}
+		priceString = bookTicker.BidPrice
 		quantity = udecimal.MustFromFloat64(amount)
 		logAmount = quantity.Mul(udecimal.MustParse(priceString)).InexactFloat64()
 		quoteQty = logAmount
@@ -563,6 +584,11 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 
 func checkQtyAndNotional(symbol *Symbol, quantity udecimal.Decimal, price string) (ok bool, err error) {
 	// Check minimum quantity
+	if symbol.Filter.LotSize.MinQty == "" {
+		// If no LOT_SIZE filter is available, skip quantity check
+		return true, nil
+	}
+
 	minQty, err := udecimal.Parse(symbol.Filter.LotSize.MinQty)
 	if err != nil {
 		return false, err
@@ -577,6 +603,11 @@ func checkQtyAndNotional(symbol *Symbol, quantity udecimal.Decimal, price string
 	}
 
 	// Check notional
+	if symbol.Filter.MinNotional == "" {
+		// If no NOTIONAL filter is available, skip notional check
+		return true, nil
+	}
+
 	minNotional, err := udecimal.Parse(symbol.Filter.MinNotional)
 	if err != nil {
 		return false, err
@@ -590,6 +621,11 @@ func checkQtyAndNotional(symbol *Symbol, quantity udecimal.Decimal, price string
 }
 
 func stepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decimal, error) {
+	if symbol.Filter.LotSize.StepSize == "" {
+		// If no LOT_SIZE filter is available, return quantity as-is
+		return quantity, nil
+	}
+
 	stepSize, err := udecimal.Parse(symbol.Filter.LotSize.StepSize)
 	if err != nil {
 		return udecimal.Decimal{}, err
@@ -607,6 +643,11 @@ func stepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decim
 }
 
 func stepSizeQuantityFloat(symbol *Symbol, quantity float64) (float64, error) {
+	if symbol.Filter.LotSize.StepSize == "" {
+		// If no LOT_SIZE filter is available, return quantity as-is
+		return quantity, nil
+	}
+
 	stepSize, err := strconv.ParseFloat(symbol.Filter.LotSize.StepSize, 64)
 	if err != nil {
 		return 0, err
@@ -632,7 +673,11 @@ func tryExecutePathWithRollback(client *binance.Client, prevSymbol *Symbol, prev
 		var realAmount udecimal.Decimal
 		if path.Direction == "BUY" {
 			amB := udecimal.MustFromFloat64(prevAmount)
-			bid := udecimal.MustParse(path.GetBookTicker().BidPrice)
+			bookTicker := path.GetBookTicker()
+			if bookTicker == nil {
+				return nil, fmt.Errorf("no book ticker data available for symbol %s", path.Pair.String())
+			}
+			bid := udecimal.MustParse(bookTicker.BidPrice)
 			realAmount, err = amB.Div(bid)
 			if err != nil {
 				return nil, err
@@ -659,6 +704,12 @@ func tryExecutePathWithRollback(client *binance.Client, prevSymbol *Symbol, prev
 }
 
 func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
+	// Check if MarketLotSize filter is available
+	if s.Filter.MarketLotSize.MaxQty == "" {
+		// If no MARKET_LOT_SIZE filter is available, skip this check
+		return true, nil
+	}
+
 	marketMaxQty, err := udecimal.Parse(s.Filter.MarketLotSize.MaxQty)
 	if err != nil {
 		return false, err
@@ -670,7 +721,13 @@ func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
 	}
 
 	if p.Direction == "BUY" {
-		priceString := p.GetBookTicker().AskPrice
+		bookTicker := p.GetBookTicker()
+		if bookTicker == nil {
+			// If no book ticker data is available, skip this check
+			return true, nil
+		}
+
+		priceString := bookTicker.AskPrice
 		price, err := udecimal.Parse(priceString)
 		if err != nil {
 			return false, err

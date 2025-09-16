@@ -41,6 +41,7 @@ func main() {
 		Str("API_SECRET", "***").
 		Float64("FEE_RATE", cfg.FeeRate).
 		Float64("ORDER_USDC_AMOUNT", cfg.OrderUSDCAmount).
+		Float64("SIMULATION_USDC_AMOUNT", cfg.SimulationUSDCAmount).
 		Str("START_ASSET", cfg.StartAsset).
 		Strs("BASE_ASSETS", cfg.BaseAssets).
 		Msg("Bot started with config from .env file")
