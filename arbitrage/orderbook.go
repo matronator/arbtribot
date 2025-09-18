@@ -18,10 +18,12 @@ import (
 )
 
 type Orderbook struct {
-	Symbols     cmap.ConcurrentMap[string, *Symbol]
-	Config      *utils.Config
-	Client      *binance.Client
-	TradeLogger *zerolog.Logger
+	Symbols       cmap.ConcurrentMap[string, *Symbol]
+	Config        *utils.Config
+	Client        *binance.Client
+	TradeLogger   *zerolog.Logger
+	ExecutionLock sync.Mutex // Global lock to ensure only one triangle executes at a time
+	IsExecuting   bool       // Flag to indicate if a triangle is currently executing
 }
 
 type Symbol struct {

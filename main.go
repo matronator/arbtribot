@@ -84,6 +84,8 @@ func main() {
 		return
 	}
 
+	return
+
 	symbols := make([]string, 0, OrderBook.Symbols.Count())
 	for symbol := range OrderBook.Symbols.IterBuffered() {
 		symbols = append(symbols, symbol.Key)

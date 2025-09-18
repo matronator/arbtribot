@@ -58,6 +58,18 @@ func (p *Path) GetBookTicker() *BookTicker {
 }
 
 func (t *Triangle) updateTriangle(ob *Orderbook) error {
+	// Check if another triangle is currently executing
+	ob.ExecutionLock.Lock()
+	if ob.IsExecuting {
+		// Another triangle is executing, skip this one
+		ob.ExecutionLock.Unlock()
+		if ob.Config.VerboseLogging {
+			logger.DebugFmt("Triangle %s skipped - another triangle is executing", t.String())
+		}
+		return nil
+	}
+	ob.ExecutionLock.Unlock()
+
 	err := t.TryExecuteTriangle(ob)
 	if err != nil {
 		return err
@@ -78,15 +90,30 @@ func (t *Triangle) TryExecuteTriangle(ob *Orderbook) error {
 
 	// logger.InfoFmt("Triangle %s simulated. Profit: %g USDC", t, profit)
 
-	if found || profit > -0.5 {
-		t.Locked = true
-		t.Lock.L.Lock()
+	if found && profit > 0.01 {
+		// Acquire global execution lock
+		ob.ExecutionLock.Lock()
+		if ob.IsExecuting {
+			// Another triangle is already executing, skip this one
+			ob.ExecutionLock.Unlock()
+			logger.DebugFmt("Triangle %s skipped - another triangle is executing", t.String())
+			return nil
+		}
+
+		// Mark that we're executing
+		ob.IsExecuting = true
+		ob.ExecutionLock.Unlock()
+
+		// Use defer to ensure we always release the execution flag
 		defer func() {
-			t.Locked = false
-			t.Lock.L.Unlock()
-			t.Lock.Broadcast()
+			ob.ExecutionLock.Lock()
+			ob.IsExecuting = false
+			ob.ExecutionLock.Unlock()
+			logger.DebugFmt("Triangle %s execution completed, global lock released", t.String())
 		}()
+
 		logger.InfoFmt("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
+		logger.DebugFmt("Triangle %s acquired global execution lock", t.String())
 		if !ob.Config.SimulationMode {
 			onCooldown, err := t.Execute(ob, ob.Config.OrderUSDCAmount)
 			if err != nil {
@@ -274,7 +301,7 @@ func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64,
 	if amount >= initialAmount {
 		found = true
 	}
-	profit = amount - initialAmount
+	profit = (amount - initialAmount) * (ob.Config.OrderUSDCAmount / ob.Config.SimulationUSDCAmount)
 
 	// Debug: Log the final calculation details
 	if ob.Config.VerboseLogging {
@@ -369,7 +396,7 @@ func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQ
 	var quantity, price float64
 
 	if p.Direction == "BUY" {
-		bookTicker := p.GetBookTicker()
+		bookTicker := s.GetBookTicker()
 		if bookTicker == nil {
 			err = fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
 			return
@@ -381,7 +408,7 @@ func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQ
 		}
 		quantity = amount / price
 	} else {
-		bookTicker := p.GetBookTicker()
+		bookTicker := s.GetBookTicker()
 		if bookTicker == nil {
 			err = fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
 			return
@@ -527,7 +554,7 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 	var baseQty, quoteQty float64
 
 	if p.Direction == "BUY" {
-		bookTicker := p.GetBookTicker()
+		bookTicker := symbol.GetBookTicker()
 		if bookTicker == nil {
 			return nil, fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
 		}
@@ -545,7 +572,7 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 		quoteQty = logAmount
 		baseQty = quantity.InexactFloat64()
 	} else {
-		bookTicker := p.GetBookTicker()
+		bookTicker := symbol.GetBookTicker()
 		if bookTicker == nil {
 			return nil, fmt.Errorf("no book ticker data available for symbol %s", p.Pair.String())
 		}
@@ -568,9 +595,9 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 		return nil, err
 	}
 
-	if ok, err := checkQtyAndNotional(symbol, newQty, priceString); !ok {
-		return nil, err
-	}
+	// if ok, err := checkQtyAndNotional(symbol, newQty, priceString); !ok {
+	// 	return nil, err
+	// }
 
 	qty, err := strconv.ParseFloat(newQty.StringFixed(uint8(symbol.BasePrecision)), 64)
 	if err != nil {
@@ -721,7 +748,7 @@ func checkMarketLotSize(s *Symbol, p *Path, qty float64) (bool, error) {
 	}
 
 	if p.Direction == "BUY" {
-		bookTicker := p.GetBookTicker()
+		bookTicker := s.GetBookTicker()
 		if bookTicker == nil {
 			// If no book ticker data is available, skip this check
 			return true, nil
