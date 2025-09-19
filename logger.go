@@ -13,7 +13,7 @@ import (
 )
 
 func DebugFmt(format string, args ...any) {
-	if cfg.DebugMode {
+	if cfg.GeneralConfig.DebugMode {
 		log.Debug().Caller(1).Msgf(format, args...)
 	}
 }
@@ -21,7 +21,7 @@ func DebugFmt(format string, args ...any) {
 func SetUpLogger() {
 	var writers []io.Writer
 
-	if cfg.DebugMode {
+	if cfg.GeneralConfig.DebugMode {
 		writers = append(writers, zerolog.ConsoleWriter{
 			Out:        os.Stdout,
 			TimeFormat: time.DateTime,

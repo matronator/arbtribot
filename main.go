@@ -3,6 +3,7 @@ package main
 import (
 	"arbtribot/arbitrage"
 	"arbtribot/currency"
+	"arbtribot/grid"
 	"arbtribot/logger"
 	"arbtribot/utils"
 	"fmt"
@@ -23,6 +24,7 @@ var cfg *utils.Config
 var client *binance.Client
 var OrderBook *arbitrage.Orderbook
 var SimTradeLogger zerolog.Logger
+var GridBot *grid.GridTradingBot
 
 func main() {
 	cmd := exec.Command("scripts/populator")
@@ -35,23 +37,24 @@ func main() {
 	SetUpLogger()
 	SimTradeLogger = logger.NewSimTradeWriter()
 	log.Info().
-		Bool("SIMULATION_MODE", cfg.SimulationMode).
-		Bool("DEBUG_MODE", cfg.DebugMode).
+		Bool("SIMULATION_MODE", cfg.GeneralConfig.SimulationMode).
+		Bool("DEBUG_MODE", cfg.GeneralConfig.DebugMode).
 		Str("API_KEY", "***").
 		Str("API_SECRET", "***").
-		Float64("FEE_RATE", cfg.FeeRate).
-		Float64("ORDER_USDC_AMOUNT", cfg.OrderUSDCAmount).
-		Float64("SIMULATION_USDC_AMOUNT", cfg.SimulationUSDCAmount).
-		Str("START_ASSET", cfg.StartAsset).
-		Strs("BASE_ASSETS", cfg.BaseAssets).
+		Float64("FEE_RATE", cfg.GeneralConfig.FeeRate).
+		Float64("ORDER_USDC_AMOUNT", cfg.TriangleConfig.OrderUSDCAmount).
+		Float64("SIMULATION_USDC_AMOUNT", cfg.TriangleConfig.SimulationUSDCAmount).
+		Str("START_ASSET", cfg.TriangleConfig.StartAsset).
+		Strs("BASE_ASSETS", cfg.TriangleConfig.BaseAssets).
+		Str("TRADING_MODE", cfg.GeneralConfig.TradingMode).
 		Msg("Bot started with config from .env file")
-	if cfg.SimulationMode {
+	if cfg.GeneralConfig.SimulationMode {
 		logger.InfoFmt("MODE: %s %s", logger.Green("SIMULATION"), logger.Italic(logger.Dim("(no real trades will be placed, only logs)")))
 	} else {
 		logger.InfoFmt("MODE: %s %s", logger.Yellow("LIVE TRADING"), logger.Italic(logger.BgYellow("(real trades will be placed)")))
 	}
 
-	client = binance.NewClient(cfg.APIKey, cfg.APISecret)
+	client = binance.NewClient(cfg.GeneralConfig.APIKey, cfg.GeneralConfig.APISecret)
 
 	currency.FillPairs()
 
@@ -69,22 +72,184 @@ func main() {
 	}
 	logger.InfoFmt("OrderBook filled with %d symbols.", added)
 
-	triangles := OrderBook.FindTriangles()
-	logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
-
-	if !cfg.WdEnabled {
-		logger.ErrorFmt("%s", logger.Red("[Binance error] Enable withdrawals for this token to continue with the current action."))
-		logger.WarningFmt("%s", logger.Yellow("Starting on August 25th tokens will be required to have withdrawal permission in order to trade all USDC or USDT pairs."))
-		return
+	// Check trading mode and start appropriate strategy
+	if cfg.GeneralConfig.TradingMode == "grid" {
+		logger.InfoFmt("%s", logger.Green("Starting Grid Trading Mode..."))
+		startGridTrading(OrderBook)
+	} else if cfg.GeneralConfig.TradingMode == "triangle" {
+		logger.InfoFmt("%s", logger.Green("Starting Triangle Arbitrage Mode..."))
+		startTriangleArbitrage()
+	} else if cfg.GeneralConfig.TradingMode == "normal" {
+		logger.InfoFmt("%s", logger.Green("Starting Normal Trading Mode..."))
+		startNormalTrading(OrderBook)
 	}
 
-	AccountBalances, err = CheckAccountBalance()
+	defer func() {
+		logger.InfoFmt("Bot is shutting down...")
+		logger.InfoFmt("See you next time! %s", logger.Blue("Arbtribot ended..."))
+	}()
+}
+
+func startNormalTrading(ob *arbitrage.Orderbook) {
+	logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
+
+	_, err := CheckAccountBalance()
 	if err != nil {
 		logger.Error(err)
 		return
 	}
 
-	return
+	symbols := make([]string, 0, len(cfg.NormalConfig.QuoteAssets))
+	for _, asset := range cfg.NormalConfig.QuoteAssets {
+		symbols = append(symbols, asset+cfg.NormalConfig.BaseAsset)
+	}
+
+	websocketStreamClient := binance.NewWebsocketStreamClient(false)
+	handler := NewBookTickerHandler(ob)
+
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+	errCh := make(chan error)
+
+	for i := 0; i < len(symbols); i += 1 {
+		symbol := symbols[i]
+		wg.Add(1)
+		go func(symbol string) {
+			defer wg.Done()
+			logger.InfoFmt("Starting websocket stream for %s.", symbol)
+			doneCh, stop, err := websocketStreamClient.WsBookTickerServe(
+				symbol,
+				handler.HandleBookTickerEvent,
+				handler.HandleError,
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			// Wait for stop signal
+			select {
+			case <-stopCh:
+				stop <- struct{}{}
+			case <-doneCh:
+				return
+			}
+		}(symbol)
+	}
+
+	time.Sleep(time.Millisecond * 15)
+	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Normal trading bot is running...")))
+
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errCh:
+		logger.Error(err)
+		close(stopCh) // Signal all goroutines to stop
+	case <-quitChannel:
+		logger.InfoFmt("Received interrupt signal. Closing connections...")
+		close(stopCh) // Signal all goroutines to stop
+	}
+
+	wg.Wait()
+}
+
+// startGridTrading initializes and starts the grid trading bot
+func startGridTrading(ob *arbitrage.Orderbook) {
+	// Create grid trading bot
+	GridBot = grid.NewGridTradingBot(cfg, client, ob, &SimTradeLogger)
+
+	_, err := CheckAccountBalance()
+	if err != nil {
+		logger.Error(err)
+		return
+	}
+
+	// Start grid trading
+	err = GridBot.StartGridTrading()
+	if err != nil {
+		logger.ErrorFmt("Failed to start grid trading: %v", err)
+		return
+	}
+
+	// Set up websocket for real-time price updates
+	symbols := make([]string, 0, ob.Symbols.Count())
+	for symbol := range ob.Symbols.IterBuffered() {
+		symbols = append(symbols, symbol.Key)
+	}
+
+	websocketStreamClient := binance.NewWebsocketStreamClient(true)
+	handler := NewBookTickerHandler(ob)
+
+	chunkSize := 150
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+	errCh := make(chan error)
+
+	for i := 0; i < len(symbols); i += chunkSize {
+		end := min(i+chunkSize, len(symbols))
+		chunk := symbols[i:end]
+
+		wg.Add(1)
+		go func(symbolsChunk []string) {
+			defer wg.Done()
+			logger.InfoFmt("Starting websocket stream for %d symbols.", len(symbolsChunk))
+			doneCh, stop, err := websocketStreamClient.WsCombinedBookTickerServe(
+				symbolsChunk,
+				handler.HandleBookTickerEvent,
+				handler.HandleError,
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			// Wait for stop signal
+			select {
+			case <-stopCh:
+				stop <- struct{}{}
+			case <-doneCh:
+				return
+			}
+		}(chunk)
+	}
+
+	time.Sleep(time.Millisecond * 15)
+	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Grid trading bot is running...")))
+
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for either an error or an interrupt signal
+	select {
+	case err := <-errCh:
+		logger.Error(err)
+		close(stopCh) // Signal all goroutines to stop
+	case <-quitChannel:
+		logger.InfoFmt("Received interrupt signal. Closing connections...")
+		close(stopCh) // Signal all goroutines to stop
+	}
+
+	wg.Wait()
+}
+
+// startTriangleArbitrage starts the original triangle arbitrage mode
+func startTriangleArbitrage() {
+	triangles := OrderBook.FindTriangles()
+	logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Found %d triangles!", len(triangles))))
+
+	if !cfg.GeneralConfig.WdEnabled {
+		logger.ErrorFmt("%s", logger.Red("[Binance error] Enable withdrawals for this token to continue with the current action."))
+		logger.WarningFmt("%s", logger.Yellow("Starting on August 25th tokens will be required to have withdrawal permission in order to trade all USDC or USDT pairs."))
+		return
+	}
+
+	_, err := CheckAccountBalance()
+	if err != nil {
+		logger.Error(err)
+		return
+	}
 
 	symbols := make([]string, 0, OrderBook.Symbols.Count())
 	for symbol := range OrderBook.Symbols.IterBuffered() {
@@ -144,18 +309,13 @@ func main() {
 	}
 
 	wg.Wait()
-
-	defer func() {
-		logger.InfoFmt("Bot is shutting down...")
-		logger.InfoFmt("See you next time! %s", logger.Blue("Arbtribot ended..."))
-	}()
 }
 
 func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 	for {
 		opportunities := make([]*arbitrage.Triangle, 0)
 		for _, triangle := range triangles {
-			found, profit, err := triangle.CheckArbitrage(ob, cfg.FeeRate)
+			found, profit, err := triangle.CheckArbitrage(ob, cfg.GeneralConfig.FeeRate)
 			if err != nil {
 				logger.Error(err)
 				continue
@@ -173,12 +333,12 @@ func loop(triangles []*arbitrage.Triangle, ob *arbitrage.Orderbook) {
 		}
 
 		executed := false
-		if !cfg.SimulationMode {
+		if !cfg.GeneralConfig.SimulationMode {
 			count := 0
 
 			for _, t := range opportunities {
 				if count < 5 {
-					locked, err := t.Execute(ob, cfg.OrderUSDCAmount)
+					locked, err := t.Execute(ob, cfg.TriangleConfig.OrderUSDCAmount)
 					if err != nil {
 						logger.Error(err)
 						continue

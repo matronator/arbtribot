@@ -8,7 +8,7 @@ import (
 )
 
 func Test() {
-	client := binance.NewWebsocketAPIClient(cfg.APIKey, cfg.APISecret)
+	client := binance.NewWebsocketAPIClient(cfg.GeneralConfig.APIKey, cfg.GeneralConfig.APISecret)
 
 	err := client.Connect()
 	if err != nil {
@@ -69,7 +69,7 @@ func (h *BookTickerHandler) HandleBookTickerEvent(event *binance.WsBookTickerEve
 		}
 
 		// Debug: Log price updates
-		if h.orderbook.Config.VerboseLogging {
+		if h.orderbook.Config.GeneralConfig.VerboseLogging {
 			logger.DebugFmt("Updated %s: Ask=%s, Bid=%s", event.Symbol, bookCopy.AskPrice, bookCopy.BidPrice)
 		}
 

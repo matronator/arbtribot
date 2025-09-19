@@ -63,7 +63,7 @@ func (t *Triangle) updateTriangle(ob *Orderbook) error {
 	if ob.IsExecuting {
 		// Another triangle is executing, skip this one
 		ob.ExecutionLock.Unlock()
-		if ob.Config.VerboseLogging {
+		if ob.Config.GeneralConfig.VerboseLogging {
 			logger.DebugFmt("Triangle %s skipped - another triangle is executing", t.String())
 		}
 		return nil
@@ -114,8 +114,8 @@ func (t *Triangle) TryExecuteTriangle(ob *Orderbook) error {
 
 		logger.InfoFmt("%s %s - PROFIT: %g%%", logger.Green("Arbitrage found!"), t, profit)
 		logger.DebugFmt("Triangle %s acquired global execution lock", t.String())
-		if !ob.Config.SimulationMode {
-			onCooldown, err := t.Execute(ob, ob.Config.OrderUSDCAmount)
+		if !ob.Config.GeneralConfig.SimulationMode {
+			onCooldown, err := t.Execute(ob, ob.Config.TriangleConfig.OrderUSDCAmount)
 			if err != nil {
 				return err
 			}
@@ -261,7 +261,7 @@ func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64,
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	initialAmount := ob.Config.SimulationUSDCAmount
+	initialAmount := ob.Config.TriangleConfig.SimulationUSDCAmount
 	amount := initialAmount
 	paths := [3]*Path{t.PathA, t.PathB, t.PathC}
 	for _, p := range paths {
@@ -277,7 +277,7 @@ func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64,
 		}
 
 		executedQty, quoteQty, err := p.simulatePathWithBookTicker(ob, s, amount, currentBookTicker)
-		if ob.Config.VerboseLogging {
+		if ob.Config.GeneralConfig.VerboseLogging {
 			logger.DebugFmt("Simulated path %s %s with amount %g: executedQty %g - quoteQty %g (Ask: %s, Bid: %s)",
 				p.Direction, p.Pair.String(), amount, executedQty, quoteQty,
 				currentBookTicker.AskPrice, currentBookTicker.BidPrice)
@@ -293,7 +293,7 @@ func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64,
 		}
 
 		// Debug: Log intermediate amounts
-		if ob.Config.VerboseLogging {
+		if ob.Config.GeneralConfig.VerboseLogging {
 			logger.DebugFmt("Triangle %s after path %s: amount=%g", t, p.Pair.String(), amount)
 		}
 	}
@@ -301,10 +301,10 @@ func (t *Triangle) SimulateArbitrage(ob *Orderbook) (found bool, profit float64,
 	if amount >= initialAmount {
 		found = true
 	}
-	profit = (amount - initialAmount) * (ob.Config.OrderUSDCAmount / ob.Config.SimulationUSDCAmount)
+	profit = (amount - initialAmount) * (ob.Config.TriangleConfig.OrderUSDCAmount / ob.Config.TriangleConfig.SimulationUSDCAmount)
 
 	// Debug: Log the final calculation details
-	if ob.Config.VerboseLogging {
+	if ob.Config.GeneralConfig.VerboseLogging {
 		logger.DebugFmt("Triangle %s FINAL CALC: initialAmount=%g, finalAmount=%g, profit=%g",
 			t, initialAmount, amount, profit)
 	}
@@ -352,7 +352,7 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 
 	// Check cache first
 	if result, exists := t.priceCache.Get(tc); exists {
-		if ob.Config.VerboseLogging {
+		if ob.Config.GeneralConfig.VerboseLogging {
 			logger.DebugFmt(
 				"Triangle %s using %s result. Profit: %g USDC (Cache size: %s)",
 				t,
@@ -365,7 +365,7 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 	}
 
 	// Debug: Log cache key details
-	if ob.Config.VerboseLogging {
+	if ob.Config.GeneralConfig.VerboseLogging {
 		logger.DebugFmt("Triangle %s cache MISS. Key: A[%s/%s] B[%s/%s] C[%s/%s] (Cache size: %s)",
 			t,
 			tc.SymbolA.Ask, tc.SymbolA.Bid,
@@ -384,7 +384,7 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 		err:    err,
 	})
 
-	if ob.Config.VerboseLogging {
+	if ob.Config.GeneralConfig.VerboseLogging {
 		logger.DebugFmt("Triangle %s %s new result. Profit: %g USDC (Cache size: %s)", t, logger.Blue("CALCULATED"), profit, logger.ColorizeNumber(float64(t.priceCache.Size()), nil, &thousand))
 	}
 
@@ -392,7 +392,7 @@ func (t *Triangle) TestArbitrage(ob *Orderbook) (found bool, profit float64, err
 }
 
 func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQty, quoteQty float64, err error) {
-	fee := ob.Config.FeeRate
+	fee := ob.Config.GeneralConfig.FeeRate
 	var quantity, price float64
 
 	if p.Direction == "BUY" {
@@ -421,11 +421,11 @@ func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQ
 		quantity = amount
 	}
 
-	if ob.Config.VerboseLogging {
+	if ob.Config.GeneralConfig.VerboseLogging {
 		logger.DebugFmt("symbol: %s, price: %f, quantity: %f", s.Pair, price, quantity)
 	}
 
-	newQty, err := stepSizeQuantityFloat(s, quantity)
+	newQty, err := StepSizeQuantityFloat(s, quantity)
 	if err != nil {
 		return
 	}
@@ -437,7 +437,7 @@ func (p *Path) simulatePath(ob *Orderbook, s *Symbol, amount float64) (executedQ
 }
 
 func (p *Path) simulatePathWithBookTicker(ob *Orderbook, s *Symbol, amount float64, bookTicker *BookTicker) (executedQty, quoteQty float64, err error) {
-	fee := ob.Config.FeeRate
+	fee := ob.Config.GeneralConfig.FeeRate
 	var quantity, price float64
 
 	if p.Direction == "BUY" {
@@ -456,11 +456,11 @@ func (p *Path) simulatePathWithBookTicker(ob *Orderbook, s *Symbol, amount float
 		quantity = amount
 	}
 
-	if ob.Config.VerboseLogging {
+	if ob.Config.GeneralConfig.VerboseLogging {
 		logger.DebugFmt("symbol: %s, price: %f, quantity: %f", s.Pair, price, quantity)
 	}
 
-	newQty, err := stepSizeQuantityFloat(s, quantity)
+	newQty, err := StepSizeQuantityFloat(s, quantity)
 	if err != nil {
 		return
 	}
@@ -590,7 +590,7 @@ func (p *Path) Execute(client *binance.Client, symbol *Symbol, amount float64) (
 		Str("price", priceString).
 		Msgf("%sing %s %s for %g %s - price: %s", p.Direction, quantity, logger.Cyan(p.Pair.Base.String()), logAmount, logger.Cyan(p.Pair.Quote.String()), priceString)
 
-	newQty, err := stepSizeQuantity(symbol, quantity)
+	newQty, err := StepSizeQuantity(symbol, quantity)
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +647,7 @@ func checkQtyAndNotional(symbol *Symbol, quantity udecimal.Decimal, price string
 	return true, nil
 }
 
-func stepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decimal, error) {
+func StepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decimal, error) {
 	if symbol.Filter.LotSize.StepSize == "" {
 		// If no LOT_SIZE filter is available, return quantity as-is
 		return quantity, nil
@@ -669,7 +669,7 @@ func stepSizeQuantity(symbol *Symbol, quantity udecimal.Decimal) (udecimal.Decim
 	return newQty, nil
 }
 
-func stepSizeQuantityFloat(symbol *Symbol, quantity float64) (float64, error) {
+func StepSizeQuantityFloat(symbol *Symbol, quantity float64) (float64, error) {
 	if symbol.Filter.LotSize.StepSize == "" {
 		// If no LOT_SIZE filter is available, return quantity as-is
 		return quantity, nil

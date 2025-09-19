@@ -1,0 +1,27 @@
+---
+alwaysApply: true
+description: Rules for agent memory using cursor10x-mcp
+---
+
+# Memory
+
+## Memory Management
+
+- Always use `cursor10x-mcp` tools for memory operations
+- Use `mcp_cursor10x-mcp_storeUserMessage` to store user messages in short-term memory
+- Use `mcp_cursor10x-mcp_storeAssistantMessage` to store assistant responses in short-term memory
+- Use `mcp_cursor10x-mcp_storeMilestone` for recording project milestones in long-term memory
+- Use `mcp_cursor10x-mcp_storeDecision` for recording project decisions in long-term memory
+- Use `mcp_cursor10x-mcp_storeRequirement` for recording project requirements in long-term memory
+- Use `mcp_cursor10x-mcp_getRecentMessages` to retrieve recent conversation context
+- Use `mcp_cursor10x-mcp_getComprehensiveContext` to get full memory context when needed
+- Use `mcp_cursor10x-mcp_initConversation` at the start of conversations
+- Use `mcp_cursor10x-mcp_endConversation` when conversations conclude with meaningful outcomes
+
+## Memory Best Practices
+
+- Store important user messages with appropriate importance levels (low, medium, high)
+- Record significant code changes and architectural decisions as milestones
+- Track active files being worked on using `mcp_cursor10x-mcp_trackActiveFile`
+- Retrieve context before making major suggestions or changes
+- Use episodic memory for recording specific actions and their outcomes

@@ -107,16 +107,20 @@ func (s *Symbol) Update(book *BookTicker, ob *Orderbook) error {
 	s.SetBookTicker(bookCopy)
 	s.LastUpdated = time.Now()
 
-	triangles := make([]*Triangle, len(s.Triangles))
-	copy(triangles, s.Triangles)
+	if ob.Config.GeneralConfig.TradingMode == "triangle" {
+		triangles := make([]*Triangle, len(s.Triangles))
+		copy(triangles, s.Triangles)
 
-	s.Lock.Unlock()
+		s.Lock.Unlock()
 
-	for _, t := range triangles {
-		err := t.updateTriangle(ob)
-		if err != nil {
-			return err
+		for _, t := range triangles {
+			err := t.updateTriangle(ob)
+			if err != nil {
+				return err
+			}
 		}
+	} else {
+		s.Lock.Unlock()
 	}
 
 	return nil
