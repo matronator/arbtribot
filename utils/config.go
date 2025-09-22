@@ -13,7 +13,7 @@ type Config struct {
 	GeneralConfig  *GeneralConfig
 	GridConfig     *GridConfig
 	TriangleConfig *TriangleConfig
-	NormalConfig   *NormalConfig
+	NormalConfig   *TradingConfig
 }
 
 type GeneralConfig struct {
@@ -23,6 +23,7 @@ type GeneralConfig struct {
 	FeeRate        float64 // Binance spot trading fee rate (default 0.001 = 0.1%)
 	DebugMode      bool    // Enable debug logging
 	VerboseLogging bool    // Enable very verbose logging (debug level)
+	TraceLogging   bool    // Enable trace logging (trace level)
 	WdEnabled      bool
 	TradingMode    string // "triangle", "grid" or "normal" - determines which trading strategy to use
 }
@@ -43,7 +44,7 @@ type TriangleConfig struct {
 	BaseAssets           []string // Base currencies
 }
 
-type NormalConfig struct {
+type TradingConfig struct {
 	USDCAmount   float64  // Amount of USDC the trades will be executed for
 	MaxPositions int      // Maximum number of concurrent positions
 	StopLoss     float64  // Stop loss percentage (e.g., 0.01 for 1%)
@@ -65,6 +66,7 @@ func LoadConfig() *Config {
 				APISecret:      "",
 				FeeRate:        0.001, // 0.1% fee = 0.001
 				DebugMode:      false, // Default to false, can be set via env
+				TraceLogging:   false, // Default to false, can be set via env
 				VerboseLogging: false,
 				WdEnabled:      false,
 				TradingMode:    "grid", // Default to grid trading
@@ -83,7 +85,7 @@ func LoadConfig() *Config {
 				StartAsset:           "USDC",
 				BaseAssets:           []string{"USDC", "BTC", "BNB", "ETH"},
 			},
-			NormalConfig: &NormalConfig{
+			NormalConfig: &TradingConfig{
 				USDCAmount:   15,
 				MaxPositions: 5,
 				StopLoss:     0.01,
@@ -145,9 +147,9 @@ func LoadConfig() *Config {
 		normalMaxHoldTime = 30
 	}
 
-	normalTargetProfit, err := strconv.ParseFloat(os.Getenv("TRADING_TARGET_PROFIT"), 64)
+	normalTargetProfit, err := strconv.ParseFloat(os.Getenv("TRADING_PROFIT_TARGET"), 64)
 	if err != nil {
-		log.Warn().Err(err).Msg("Error parsing TRADING_TARGET_PROFIT from .env file, using default 0.01 (1%)")
+		log.Warn().Err(err).Msg("Error parsing TRADING_PROFIT_TARGET from .env file, using default 0.01 (1%)")
 		normalTargetProfit = 0.01
 	}
 
@@ -195,6 +197,7 @@ func LoadConfig() *Config {
 			APISecret:      os.Getenv("BINANCE_SECRET_KEY"),
 			FeeRate:        fee,
 			DebugMode:      os.Getenv("DEBUG_MODE") == "true",
+			TraceLogging:   os.Getenv("TRACE_LOGGING") == "true",
 			VerboseLogging: os.Getenv("VERBOSE_LOGGING") == "true",
 			WdEnabled:      os.Getenv("WD_ENABLED") == "true",
 			TradingMode:    os.Getenv("TRADING_MODE"),
@@ -213,7 +216,7 @@ func LoadConfig() *Config {
 			StartAsset:           os.Getenv("START_ASSET"),
 			BaseAssets:           strings.Split(os.Getenv("BASE_ASSETS"), ","),
 		},
-		NormalConfig: &NormalConfig{
+		NormalConfig: &TradingConfig{
 			USDCAmount:   normalUSDCAmount,
 			MaxPositions: normalMaxPositions,
 			StopLoss:     normalStopLoss,

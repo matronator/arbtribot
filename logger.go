@@ -48,6 +48,8 @@ func outputLevelColor(level string, msg string) string {
 		return logger.Yellow(msg) + logger.Reset()
 	case "ERROR":
 		return logger.Red(msg) + logger.Reset()
+	case "TRACE":
+		return logger.BgBrightBlack(logger.Black(msg)) + logger.Reset()
 	default:
 		return msg
 	}

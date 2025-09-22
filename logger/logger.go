@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -14,12 +15,30 @@ type ANSIStripper struct {
 	writer io.Writer
 }
 
-func Debug(format string, args ...any) {
-	log.Debug().Caller(1).Msgf(format, args...)
+func Debug(format string) {
+	log.Debug().Caller(1).Msg(format)
 }
 
 func DebugFmt(format string, args ...any) {
 	log.Debug().Caller(1).Msgf(format, args...)
+}
+
+func Trace(format string) {
+	newLogger := log.With().Logger().Sample(&zerolog.LevelSampler{TraceSampler: newTraceSampler()})
+	newLogger.Trace().Caller(1).Msg(format)
+}
+
+func TraceFmt(format string, args ...any) {
+	newLogger := log.With().Logger().Sample(&zerolog.LevelSampler{TraceSampler: newTraceSampler()})
+	newLogger.Trace().Caller(1).Msgf(format, args...)
+}
+
+func newTraceSampler() *zerolog.BurstSampler {
+	return &zerolog.BurstSampler{
+		Burst:       2,
+		Period:      time.Second * 5,
+		NextSampler: &zerolog.BasicSampler{N: 50},
+	}
 }
 
 func Info(msg string) {

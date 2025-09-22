@@ -4,6 +4,21 @@ import (
 	"strconv"
 )
 
+func ColorizeReason(reason string) string {
+	switch reason {
+	case "STOP_LOSS":
+		return Red(reason)
+	case "TAKE_PROFIT":
+	case "PROFIT_TARGET":
+		return Green(reason)
+	case "MAX_HOLD_TIME":
+		return Yellow(reason)
+	case "TIMEOUT":
+		return Blue(reason)
+	}
+	return reason
+}
+
 func ColorizeNumber(i float64, min *float64, max *float64) string {
 	var minVal, maxVal float64
 
@@ -63,6 +78,10 @@ func Blink(msg string) string {
 
 func Reverse(msg string) string {
 	return "\033[7m" + msg + "\033[27m" // Reverse
+}
+
+func Black(msg string) string {
+	return "\033[30m" + msg + "\033[39m" // Black
 }
 
 func Red(msg string) string {

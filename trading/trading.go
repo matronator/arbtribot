@@ -5,11 +5,14 @@ import (
 	"arbtribot/currency"
 	"arbtribot/logger"
 	"arbtribot/utils"
+	"context"
 	"fmt"
 	"strconv"
 	"sync"
 	"time"
 
+	binance "github.com/binance/binance-connector-go"
+	"github.com/quagmt/udecimal"
 	"github.com/rs/zerolog"
 )
 
@@ -97,7 +100,7 @@ func (tb *TradingBot) StartTrading() {
 }
 
 func (tb *TradingBot) tradingLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(time.Second * 5)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -116,9 +119,14 @@ func (tb *TradingBot) processTradingCycle() {
 }
 
 func (tb *TradingBot) checkExistingPositions() {
+	logger.InfoFmt("Checking %d existing positions", len(tb.Positions))
 	for symbolStr, position := range tb.Positions {
 		if position.Status != "OPEN" {
 			continue
+		}
+
+		if tb.cfg.GeneralConfig.VerboseLogging {
+			logger.InfoFmt("Checking position %s", symbolStr)
 		}
 
 		// Check if position has exceeded max hold time
@@ -139,7 +147,7 @@ func (tb *TradingBot) checkExistingPositions() {
 			continue
 		}
 
-		// Calculate current profit/loss
+		// Calculate current profit/loss using bid price (what we'd get when selling)
 		currentPrice, err := strconv.ParseFloat(bookTicker.BidPrice, 64)
 		if err != nil {
 			logger.ErrorFmt("Failed to parse current price for %s: %v", symbolStr, err)
@@ -152,26 +160,56 @@ func (tb *TradingBot) checkExistingPositions() {
 			continue
 		}
 
-		profitAmount := currentPrice - entryPrice
+		// Calculate bid-ask spread for debugging
+		askPrice, err := strconv.ParseFloat(bookTicker.AskPrice, 64)
+		if err == nil {
+			spread := ((askPrice - currentPrice) / currentPrice) * 100
+			if tb.cfg.GeneralConfig.VerboseLogging {
+				logger.DebugFmt("Bid-Ask spread for %s: %.4f%% (Bid: %.8f, Ask: %.8f)",
+					symbolStr, spread, currentPrice, askPrice)
+			}
+		}
+
+		quantity, err := strconv.ParseFloat(position.Quantity, 64)
+		if err != nil {
+			logger.ErrorFmt("Failed to parse quantity for %s: %v", symbolStr, err)
+			continue
+		}
+
+		// Calculate profit/loss based on total USDC amounts
+		totalUSDCReceived := quantity * currentPrice
+		totalUSDCSpent := quantity * entryPrice
+		profitAmount := totalUSDCReceived - totalUSDCSpent
 
 		// Calculate profit percentage
-		profitPercentage := profitAmount / entryPrice
+		profitPercentage := profitAmount / totalUSDCSpent
+
+		// Debug logging for profit calculation
+		if tb.cfg.GeneralConfig.VerboseLogging {
+			logger.DebugFmt("Profit calculation for %s: Qty=%.8f, Entry=%.8f, Current=%.8f, Spent=%.2f, Received=%.2f, Profit=%.2f, Pct=%.4f%%",
+				symbolStr, quantity, entryPrice, currentPrice, totalUSDCSpent, totalUSDCReceived, profitAmount, profitPercentage*100)
+		}
 
 		// Update position profit
 		position.ProfitPercentage = profitPercentage
 		position.ProfitAmount = profitAmount
 
-		// Check for profit target or stop loss
-		if profitPercentage >= tb.cfg.NormalConfig.TargetProfit {
-			tb.closePosition(symbolStr, "PROFIT_TARGET")
-		} else if profitPercentage <= -tb.cfg.NormalConfig.StopLoss {
-			tb.closePosition(symbolStr, "STOP_LOSS")
+		// Log the calculation
+		if tb.cfg.GeneralConfig.VerboseLogging {
+			logger.InfoFmt("Position %s: Entry=%.8f, Current=%.8f, P&L=%.4f%% (%.2f USDC), Target=%.4f%%, Stop=%.4f%%",
+				symbolStr, entryPrice, currentPrice, profitPercentage*100, profitAmount,
+				tb.cfg.NormalConfig.TargetProfit*100, tb.cfg.NormalConfig.StopLoss*100)
 		}
 
-		// Log position status
-		if tb.cfg.GeneralConfig.VerboseLogging {
-			logger.DebugFmt("Position %s: Entry=%.8f, Current=%.8f, P&L=%.4f%% (%.2f USDC)",
-				symbolStr, entryPrice, currentPrice, profitPercentage*100, profitAmount)
+		// Check for profit target or stop loss
+		if profitPercentage >= tb.cfg.NormalConfig.TargetProfit {
+			logger.InfoFmt("Profit target reached for %s: %.4f%% >= %.4f%%",
+				symbolStr, profitPercentage*100, tb.cfg.NormalConfig.TargetProfit*100)
+			tb.closePosition(symbolStr, "PROFIT_TARGET")
+		} else if profitPercentage <= -tb.cfg.NormalConfig.StopLoss {
+			logger.InfoFmt("Stop loss triggered for %s: %.4f%% <= -%.4f%%",
+				symbolStr, profitPercentage*100, tb.cfg.NormalConfig.StopLoss*100)
+			tb.closePosition(symbolStr, "STOP_LOSS")
 		}
 	}
 }
@@ -198,6 +236,14 @@ func (tb *TradingBot) updatePriceHistory() {
 		if len(tb.History[symbol.String()]) > 50 {
 			tb.History[symbol.String()] = tb.History[symbol.String()][1:]
 		}
+
+		if tb.cfg.GeneralConfig.TraceLogging {
+			logger.TraceFmt("Updated price history for %s: %v", symbol.String(), tb.History[symbol.String()])
+		}
+	}
+
+	if tb.cfg.GeneralConfig.TraceLogging {
+		logger.DebugFmt("Updated price history for %d symbols", len(tb.History))
 	}
 }
 
@@ -271,7 +317,7 @@ func (tb *TradingBot) analyzePriceMovement(history []PricePoint) (float64, bool)
 	// and the overall price change is positive
 	isUpwardTrend := upwardCount >= int(float64(recentDataPoints-1)*0.6) && priceChange > 0
 
-	if tb.cfg.GeneralConfig.VerboseLogging {
+	if tb.cfg.GeneralConfig.TraceLogging {
 		logger.DebugFmt("Price analysis: change=%.4f%%, upward_movements=%d/%d, is_upward=%t",
 			priceChange*100, upwardCount, recentDataPoints-1, isUpwardTrend)
 	}
@@ -301,9 +347,16 @@ func (tb *TradingBot) openPosition(symbol currency.Pair, pricePoint PricePoint) 
 		return
 	}
 
+	// Use the actual market ask price as entry price
+	entryPricePerUnit, err := strconv.ParseFloat(pricePoint.AskPrice, 64)
+	if err != nil {
+		logger.ErrorFmt("Failed to parse entry price for %s: %v", symbol.String(), err)
+		return
+	}
+
 	position := &Position{
 		Symbol:           symbol,
-		EntryPrice:       pricePoint.AskPrice,
+		EntryPrice:       strconv.FormatFloat(entryPricePerUnit, 'f', 8, 64),
 		Quantity:         strconv.FormatFloat(quantity, 'f', int(symbolData.BasePrecision), 64),
 		EntryTime:        time.Now(),
 		ProfitPercentage: 0,
@@ -312,14 +365,38 @@ func (tb *TradingBot) openPosition(symbol currency.Pair, pricePoint PricePoint) 
 		MaxHoldTime:      time.Duration(tb.cfg.NormalConfig.MaxHoldTime) * time.Minute,
 	}
 
+	cummulativeQuoteQty := tb.cfg.NormalConfig.USDCAmount
+
 	if !tb.cfg.GeneralConfig.SimulationMode {
-		res, err := arbitrage.NewMarketOrder(tb.ob.Client, &symbol, "BUY", quantity)
+		res, err := tb.NewMarketOrder(&symbol, "BUY", quantity)
 		if err != nil {
 			logger.ErrorFmt("Failed to execute buy order for %s: %v", symbol.String(), err)
 			return
 		}
 		position.Quantity = res.ExecutedQty
-		position.EntryPrice = res.CummulativeQuoteQty
+
+		// Calculate the actual entry price per unit from the executed trade
+		executedQty, err := strconv.ParseFloat(res.ExecutedQty, 64)
+		if err != nil {
+			logger.ErrorFmt("Failed to parse executed quantity for %s: %v", symbol.String(), err)
+			return
+		}
+		cummulativeQuoteQty, err = strconv.ParseFloat(res.CummulativeQuoteQty, 64)
+		if err != nil {
+			logger.ErrorFmt("Failed to parse cummulative quote quantity for %s: %v", symbol.String(), err)
+			return
+		}
+		actualEntryPricePerUnit := cummulativeQuoteQty / executedQty
+		position.EntryPrice = strconv.FormatFloat(actualEntryPricePerUnit, 'f', 8, 64)
+
+		assets := make([]string, 0)
+		assets = append(assets, tb.cfg.NormalConfig.QuoteAssets...)
+		assets = append(assets, tb.cfg.NormalConfig.BaseAsset)
+
+		_, err = utils.CheckAccountBalances(tb.ob.Client, assets)
+		if err != nil {
+			logger.ErrorFmt("Failed to check account balances for %s: %v", symbol.String(), err)
+		}
 	} else {
 		logger.InfoFmt("%s %s", logger.Yellow("[SIMULATION MODE]"), logger.Italic(fmt.Sprintf("Would execute buy order for %s: %v", symbol.String(), quantity)))
 	}
@@ -335,7 +412,7 @@ func (tb *TradingBot) openPosition(symbol currency.Pair, pricePoint PricePoint) 
 	}
 
 	logger.InfoFmt("Opened position for %s: Entry=%.8f, Quantity=%.8f, USDC=%.2f",
-		symbol.String(), entryPrice, quantity, tb.cfg.NormalConfig.USDCAmount)
+		symbol.String(), entryPricePerUnit, quantity, cummulativeQuoteQty)
 
 	// Log to trade logger
 	tb.tradeLogger.Info().
@@ -369,7 +446,7 @@ func (tb *TradingBot) closePosition(symbolStr, reason string) {
 	}
 
 	// Calculate final profit/loss
-	currentPrice, err := strconv.ParseFloat(bookTicker.BidPrice, 64)
+	exitPricePerUnit, err := strconv.ParseFloat(bookTicker.BidPrice, 64)
 	if err != nil {
 		logger.ErrorFmt("Failed to parse current price for closing %s: %v", symbolStr, err)
 		return
@@ -381,8 +458,20 @@ func (tb *TradingBot) closePosition(symbolStr, reason string) {
 		return
 	}
 
-	profitAmount := currentPrice - entryPrice
-	profitPercentage := profitAmount / entryPrice
+	// Calculate the actual USDC amount we would receive when selling
+	quantity, err := strconv.ParseFloat(position.Quantity, 64)
+	if err != nil {
+		logger.ErrorFmt("Failed to parse quantity for closing %s: %v", symbolStr, err)
+		return
+	}
+
+	// Calculate total USDC we'd receive
+	totalUSDCReceived := quantity * exitPricePerUnit
+	// Calculate total USDC we spent
+	totalUSDCSpent := quantity * entryPrice
+
+	profitAmount := totalUSDCReceived - totalUSDCSpent
+	profitPercentage := profitAmount / totalUSDCSpent
 
 	// Update position status
 	position.Status = "CLOSED"
@@ -397,17 +486,45 @@ func (tb *TradingBot) closePosition(symbolStr, reason string) {
 		Profit:        strconv.FormatFloat(profitAmount, 'f', 6, 64),
 	}
 
-	quantity, err := strconv.ParseFloat(position.Quantity, 64)
+	quantity, err = strconv.ParseFloat(position.Quantity, 64)
 	if err != nil {
 		logger.ErrorFmt("Failed to parse quantity for %s: %v", symbolStr, err)
 		return
 	}
 
 	if !tb.cfg.GeneralConfig.SimulationMode {
-		_, err = arbitrage.NewMarketOrder(tb.ob.Client, &symbolData.Pair, "SELL", quantity)
+		res, err := tb.NewMarketOrder(&symbolData.Pair, "SELL", quantity)
 		if err != nil {
 			logger.ErrorFmt("Failed to execute sell order for %s: %v", symbolStr, err)
 			return
+		}
+		position.Quantity = res.ExecutedQty
+
+		// Calculate the actual exit price per unit from the executed trade
+		executedQty, err := strconv.ParseFloat(res.ExecutedQty, 64)
+		if err != nil {
+			logger.ErrorFmt("Failed to parse executed quantity for %s: %v", symbolStr, err)
+			return
+		}
+		cummulativeQuoteQty, err := strconv.ParseFloat(res.CummulativeQuoteQty, 64)
+		if err != nil {
+			logger.ErrorFmt("Failed to parse cummulative quote quantity for %s: %v", symbolStr, err)
+			return
+		}
+		actualExitPricePerUnit := cummulativeQuoteQty / executedQty
+		closedPosition.ClosingPrice = strconv.FormatFloat(actualExitPricePerUnit, 'f', 8, 64)
+
+		// Calculate real profit using the actual prices
+		realProfit := (actualExitPricePerUnit - entryPrice) * executedQty
+		closedPosition.Profit = strconv.FormatFloat(realProfit, 'f', 6, 64)
+
+		assets := make([]string, 0)
+		assets = append(assets, tb.cfg.NormalConfig.QuoteAssets...)
+		assets = append(assets, tb.cfg.NormalConfig.BaseAsset)
+
+		_, err = utils.CheckAccountBalances(tb.ob.Client, assets)
+		if err != nil {
+			logger.ErrorFmt("Failed to check account balances for %s: %v", symbolStr, err)
 		}
 	} else {
 		logger.InfoFmt("%s %s", logger.Yellow("[SIMULATION MODE]"), logger.Italic(fmt.Sprintf("Would execute sell order for %s: %v", symbolStr, position.Quantity)))
@@ -421,7 +538,7 @@ func (tb *TradingBot) closePosition(symbolStr, reason string) {
 
 	// Log the closure
 	logger.InfoFmt("Closed position for %s: Entry=%.8f, Exit=%.8f, P&L=%.4f%% (%.2f USDC), Reason=%s",
-		symbolStr, entryPrice, currentPrice, profitPercentage*100, profitAmount, reason)
+		symbolStr, entryPrice, exitPricePerUnit, profitPercentage*100, profitAmount, logger.ColorizeReason(reason))
 
 	// Log to trade logger
 	tb.tradeLogger.Info().
@@ -440,4 +557,49 @@ func (tb *TradingBot) closePosition(symbolStr, reason string) {
 		movement.IsUpward = false
 		movement.RoundsInRow = 0
 	}
+}
+
+func (tb *TradingBot) NewMarketOrder(pair *currency.Pair, dir string, qty float64) (*binance.CreateOrderResponseFULL, error) {
+	symbol := pair.String()
+
+	// Get symbol data to apply step size validation
+	symbolData, ok := tb.ob.Symbols.Get(symbol)
+	if !ok {
+		return nil, fmt.Errorf("symbol %s not found in orderbook", symbol)
+	}
+
+	// Apply step size validation
+	validatedQty, err := arbitrage.StepSizeQuantity(symbolData, udecimal.MustFromFloat64(qty))
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply step size to quantity: %v", err)
+	}
+
+	// Format quantity with correct precision for the API
+	quantityStr := validatedQty.StringFixed(uint8(symbolData.BasePrecision))
+	formattedQty, err := strconv.ParseFloat(quantityStr, 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to format quantity with correct precision: %v", err)
+	}
+
+	order, err := tb.ob.Client.NewCreateOrderService().Symbol(symbol).
+		Quantity(formattedQty).Type("MARKET").Side(dir).Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	var color func(msg string) string
+	if dir == "BUY" {
+		color = logger.Green
+	} else {
+		color = logger.Red
+	}
+
+	res := order.(*binance.CreateOrderResponseFULL)
+
+	if tb.cfg.GeneralConfig.VerboseLogging {
+		logger.Info(binance.PrettyPrint(res))
+	}
+	logger.InfoFmt("Order for %s placed. %s %s %s for %s %s at price %s USDC", logger.Cyan(symbol), color(dir), res.ExecutedQty, pair.Base, res.CummulativeQuoteQty, pair.Quote, res.Fills[0].Price)
+
+	return res, nil
 }

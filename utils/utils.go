@@ -1,12 +1,14 @@
 package utils
 
 import (
+	"arbtribot/logger"
 	"bufio"
 	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 
 	binance "github.com/binance/binance-connector-go"
@@ -46,6 +48,34 @@ func CheckUSDCBalance(client *binance.Client) (*binance.Balance, error) {
 	}
 
 	return nil, err
+}
+
+func CheckAccountBalances(client *binance.Client, assets []string) (map[string]binance.Balance, error) {
+	service := client.NewGetAccountService()
+	res, err := service.Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	balances := make(map[string]binance.Balance)
+
+	for _, balance := range res.Balances {
+		if !slices.Contains(assets, balance.Asset) {
+			continue
+		}
+
+		amount, err := strconv.ParseFloat(balance.Free, 32)
+		if err != nil {
+			logger.Error(err)
+			continue
+		}
+		if amount > 0 {
+			logger.InfoFmt("Account has %s %s", balance.Free, balance.Asset)
+			balances[balance.Asset] = balance
+		}
+	}
+
+	return balances, err
 }
 
 func GoroutineId() uint64 {

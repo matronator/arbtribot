@@ -5,6 +5,7 @@ import (
 	"arbtribot/currency"
 	"arbtribot/grid"
 	"arbtribot/logger"
+	"arbtribot/trading"
 	"arbtribot/utils"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ var client *binance.Client
 var OrderBook *arbitrage.Orderbook
 var SimTradeLogger zerolog.Logger
 var GridBot *grid.GridTradingBot
+var TradingBot *trading.TradingBot
 
 func main() {
 	cmd := exec.Command("scripts/populator")
@@ -73,14 +75,15 @@ func main() {
 	logger.InfoFmt("OrderBook filled with %d symbols.", added)
 
 	// Check trading mode and start appropriate strategy
-	if cfg.GeneralConfig.TradingMode == "grid" {
+	switch cfg.GeneralConfig.TradingMode {
+	case "grid":
 		logger.InfoFmt("%s", logger.Green("Starting Grid Trading Mode..."))
 		startGridTrading(OrderBook)
-	} else if cfg.GeneralConfig.TradingMode == "triangle" {
+	case "triangle":
 		logger.InfoFmt("%s", logger.Green("Starting Triangle Arbitrage Mode..."))
 		startTriangleArbitrage()
-	} else if cfg.GeneralConfig.TradingMode == "normal" {
-		logger.InfoFmt("%s", logger.Green("Starting Normal Trading Mode..."))
+	case "normal":
+		logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
 		startNormalTrading(OrderBook)
 	}
 
@@ -91,13 +94,17 @@ func main() {
 }
 
 func startNormalTrading(ob *arbitrage.Orderbook) {
-	logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
+	// ConvertToUSDC("BANANAS31", "1850")
+	// ConvertToUSDC("DOGE", "41")
+	// ConvertToUSDC("NEO", "1.65")
 
 	_, err := CheckAccountBalance()
 	if err != nil {
 		logger.Error(err)
 		return
 	}
+
+	TradingBot = trading.NewTradingBot(ob, &SimTradeLogger)
 
 	symbols := make([]string, 0, len(cfg.NormalConfig.QuoteAssets))
 	for _, asset := range cfg.NormalConfig.QuoteAssets {
@@ -139,6 +146,8 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 
 	time.Sleep(time.Millisecond * 15)
 	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Normal trading bot is running...")))
+
+	TradingBot.StartTrading()
 
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
