@@ -8,13 +8,13 @@ import (
 	binance "github.com/binance/binance-connector-go"
 )
 
-func WithdrawBTC(quantity string) error {
+func WithdrawBTC(quantity string, address string) error {
 	q, err := strconv.ParseFloat(quantity, 64)
 	if err != nil {
 		return err
 	}
 
-	withdraw, err := client.NewWithdrawService().Coin("BTC").Address("bc1qlpft888fndt48fvz2c4dryndzu4657xdvedemq").
+	withdraw, err := client.NewWithdrawService().Coin("BTC").Address(address).
 		Amount(q).Do(context.Background())
 	if err != nil {
 		return err

@@ -96,13 +96,23 @@ func main() {
 func startNormalTrading(ob *arbitrage.Orderbook) {
 	// ConvertToUSDC("BANANAS31", "1850")
 	// ConvertToUSDC("DOGE", "41")
-	// ConvertToUSDC("NEO", "1.65")
+	// ConvertToUSDC("SOL", "0.131") // = 70 USDC
 
-	_, err := CheckAccountBalance()
+	// ConvertUSDCToBTC("70") // = 0.0006305853250633569 BTC
+
+	err := WithdrawBTC("0.0006", "bc1qlpft888fndt48fvz2c4dryndzu4657xdvedemq")
 	if err != nil {
 		logger.Error(err)
 		return
 	}
+
+	_, err = CheckAccountBalance()
+	if err != nil {
+		logger.Error(err)
+		return
+	}
+
+	return
 
 	TradingBot = trading.NewTradingBot(ob, &SimTradeLogger)
 
