@@ -14,6 +14,7 @@ type Config struct {
 	GridConfig     *GridConfig
 	TriangleConfig *TriangleConfig
 	NormalConfig   *TradingConfig
+	FuturesConfig  *FuturesConfig
 }
 
 type GeneralConfig struct {
@@ -26,6 +27,7 @@ type GeneralConfig struct {
 	TraceLogging   bool    // Enable trace logging (trace level)
 	WdEnabled      bool
 	TradingMode    string // "triangle", "grid" or "normal" - determines which trading strategy to use
+	Futures        bool   // true = futures trading, false = spot trading
 }
 
 type GridConfig struct {
@@ -55,6 +57,21 @@ type TradingConfig struct {
 	QuoteAssets  []string // Quote coins
 }
 
+// FuturesConfig holds configuration for the directional futures strategy.
+type FuturesConfig struct {
+	USDTPositionSize float64  // Notional size per position (in USDT)
+	MaxPositions     int      // Maximum concurrent futures positions
+	StopLoss         float64  // Max loss (as fraction) before closing
+	TrailingStart    float64  // Profit threshold that enables trailing exit
+	TrailingGap      float64  // Allowed pullback (as fraction) after trailing start
+	EntryChange      float64  // Minimum absolute price move to open a position
+	LookbackPoints   int      // History points to evaluate momentum
+	Leverage         int      // Futures leverage to apply in PnL calculation
+	CheckInterval    int      // Seconds between evaluation cycles
+	BaseAsset        string   // Futures quote asset, e.g., USDT
+	QuoteAssets      []string // Coins to trade against the base asset
+}
+
 func LoadConfig() *Config {
 	err := godotenv.Load(".env")
 	if err != nil {
@@ -70,6 +87,7 @@ func LoadConfig() *Config {
 				VerboseLogging: false,
 				WdEnabled:      false,
 				TradingMode:    "grid", // Default to grid trading
+				Futures:        false,
 			},
 			GridConfig: &GridConfig{
 				GridMinPriceChange: 0.005, // 0.5% minimum price change
@@ -94,6 +112,19 @@ func LoadConfig() *Config {
 				TargetProfit: 0.01,
 				BaseAsset:    "USDC",
 				QuoteAssets:  []string{"BTC", "BNB", "ETH"},
+			},
+			FuturesConfig: &FuturesConfig{
+				USDTPositionSize: 25,
+				MaxPositions:     3,
+				StopLoss:         0.01,
+				TrailingStart:    0.015,
+				TrailingGap:      0.004,
+				EntryChange:      0.006,
+				LookbackPoints:   20,
+				Leverage:         5,
+				CheckInterval:    5,
+				BaseAsset:        "USDT",
+				QuoteAssets:      []string{"BTC", "ETH", "BNB"},
 			},
 		}
 	}
@@ -190,6 +221,71 @@ func LoadConfig() *Config {
 		gridCheckInterval = 10
 	}
 
+	// Parse futures trading configs
+	futuresPositionSize, err := strconv.ParseFloat(os.Getenv("FUTURES_USDT_POSITION_SIZE"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_USDT_POSITION_SIZE from .env file, using default 25 USDT")
+		futuresPositionSize = 25
+	}
+
+	futuresMaxPositions, err := strconv.Atoi(os.Getenv("FUTURES_MAX_POSITIONS"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_MAX_POSITIONS from .env file, using default 3")
+		futuresMaxPositions = 3
+	}
+
+	futuresStopLoss, err := strconv.ParseFloat(os.Getenv("FUTURES_STOP_LOSS"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_STOP_LOSS from .env file, using default 0.01 (1%)")
+		futuresStopLoss = 0.01
+	}
+
+	futuresTrailingStart, err := strconv.ParseFloat(os.Getenv("FUTURES_TRAILING_START"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_TRAILING_START from .env file, using default 0.015 (1.5%)")
+		futuresTrailingStart = 0.015
+	}
+
+	futuresTrailingGap, err := strconv.ParseFloat(os.Getenv("FUTURES_TRAILING_GAP"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_TRAILING_GAP from .env file, using default 0.004 (0.4%)")
+		futuresTrailingGap = 0.004
+	}
+
+	futuresEntryChange, err := strconv.ParseFloat(os.Getenv("FUTURES_ENTRY_CHANGE"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_ENTRY_CHANGE from .env file, using default 0.006 (0.6%)")
+		futuresEntryChange = 0.006
+	}
+
+	futuresLookbackPoints, err := strconv.Atoi(os.Getenv("FUTURES_LOOKBACK_POINTS"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_LOOKBACK_POINTS from .env file, using default 20")
+		futuresLookbackPoints = 20
+	}
+
+	futuresLeverage, err := strconv.Atoi(os.Getenv("FUTURES_LEVERAGE"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_LEVERAGE from .env file, using default 5")
+		futuresLeverage = 5
+	}
+
+	futuresCheckInterval, err := strconv.Atoi(os.Getenv("FUTURES_CHECK_INTERVAL"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing FUTURES_CHECK_INTERVAL from .env file, using default 5 seconds")
+		futuresCheckInterval = 5
+	}
+
+	futuresBaseAsset := os.Getenv("FUTURES_BASE_ASSET")
+	if futuresBaseAsset == "" {
+		futuresBaseAsset = "USDT"
+	}
+
+	futuresQuoteAssets := strings.Split(os.Getenv("FUTURES_QUOTE_ASSETS"), ",")
+	if len(futuresQuoteAssets) == 1 && futuresQuoteAssets[0] == "" {
+		futuresQuoteAssets = []string{"BTC", "ETH", "BNB"}
+	}
+
 	return &Config{
 		GeneralConfig: &GeneralConfig{
 			SimulationMode: os.Getenv("SIMULATION_MODE") == "true",
@@ -201,6 +297,7 @@ func LoadConfig() *Config {
 			VerboseLogging: os.Getenv("VERBOSE_LOGGING") == "true",
 			WdEnabled:      os.Getenv("WD_ENABLED") == "true",
 			TradingMode:    os.Getenv("TRADING_MODE"),
+			Futures:        os.Getenv("FUTURES") == "true",
 		},
 		GridConfig: &GridConfig{
 			GridMinPriceChange: gridMinPriceChange,
@@ -225,6 +322,19 @@ func LoadConfig() *Config {
 			TargetProfit: normalTargetProfit,
 			BaseAsset:    os.Getenv("TRADING_BASE_ASSET"),
 			QuoteAssets:  strings.Split(os.Getenv("TRADING_QUOTE_ASSETS"), ","),
+		},
+		FuturesConfig: &FuturesConfig{
+			USDTPositionSize: futuresPositionSize,
+			MaxPositions:     futuresMaxPositions,
+			StopLoss:         futuresStopLoss,
+			TrailingStart:    futuresTrailingStart,
+			TrailingGap:      futuresTrailingGap,
+			EntryChange:      futuresEntryChange,
+			LookbackPoints:   futuresLookbackPoints,
+			Leverage:         futuresLeverage,
+			CheckInterval:    futuresCheckInterval,
+			BaseAsset:        futuresBaseAsset,
+			QuoteAssets:      futuresQuoteAssets,
 		},
 	}
 }

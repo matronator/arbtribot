@@ -7,6 +7,7 @@ import (
 	"arbtribot/logger"
 	"arbtribot/trading"
 	"arbtribot/utils"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	futures "github.com/adshao/go-binance/v2/futures"
 	binance "github.com/binance/binance-connector-go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -23,10 +25,12 @@ import (
 var AccountBalances Balances
 var cfg *utils.Config
 var client *binance.Client
+var futuresClient *futures.Client
 var OrderBook *arbitrage.Orderbook
 var SimTradeLogger zerolog.Logger
 var GridBot *grid.GridTradingBot
 var TradingBot *trading.TradingBot
+var FuturesBot *trading.FuturesBot
 
 func main() {
 	cmd := exec.Command("scripts/populator")
@@ -41,6 +45,7 @@ func main() {
 	log.Info().
 		Bool("SIMULATION_MODE", cfg.GeneralConfig.SimulationMode).
 		Bool("DEBUG_MODE", cfg.GeneralConfig.DebugMode).
+		Bool("FUTURES", cfg.GeneralConfig.Futures).
 		Str("API_KEY", "***").
 		Str("API_SECRET", "***").
 		Float64("FEE_RATE", cfg.GeneralConfig.FeeRate).
@@ -57,10 +62,15 @@ func main() {
 	}
 
 	client = binance.NewClient(cfg.GeneralConfig.APIKey, cfg.GeneralConfig.APISecret)
+	if cfg.GeneralConfig.Futures {
+		cfg.GeneralConfig.TradingMode = "futures"
+		futuresClient = futures.NewClient(cfg.GeneralConfig.APIKey, cfg.GeneralConfig.APISecret)
+		logger.InfoFmt("%s", logger.Green("FUTURES=true detected. Using futures trading mode and endpoints."))
+	}
 
 	currency.FillPairs()
 
-	OrderBook, err := arbitrage.FillOrderBook(client, cfg, &SimTradeLogger)
+	OrderBook, err := arbitrage.FillOrderBook(client, futuresClient, cfg, &SimTradeLogger)
 	if err != nil {
 		logger.Error(err)
 		return
@@ -82,6 +92,9 @@ func main() {
 	case "triangle":
 		logger.InfoFmt("%s", logger.Green("Starting Triangle Arbitrage Mode..."))
 		startTriangleArbitrage()
+	case "futures":
+		logger.InfoFmt("%s", logger.Green("Starting Futures Trading Mode..."))
+		startFuturesTrading(OrderBook)
 	case "normal":
 		logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
 		startNormalTrading(OrderBook)
@@ -100,19 +113,19 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 
 	// ConvertUSDCToBTC("70") // = 0.0006305853250633569 BTC
 
-	err := WithdrawBTC("0.0006", "bc1qlpft888fndt48fvz2c4dryndzu4657xdvedemq")
-	if err != nil {
-		logger.Error(err)
-		return
-	}
+	// err := WithdrawBTC("0.0006", "bc1qlpft888fndt48fvz2c4dryndzu4657xdvedemq")
+	// if err != nil {
+	// 	logger.Error(err)
+	// 	return
+	// }
 
-	_, err = CheckAccountBalance()
-	if err != nil {
-		logger.Error(err)
-		return
-	}
+	// _, err = CheckAccountBalance()
+	// if err != nil {
+	// 	logger.Error(err)
+	// 	return
+	// }
 
-	return
+	// return
 
 	TradingBot = trading.NewTradingBot(ob, &SimTradeLogger)
 
@@ -172,6 +185,97 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 	}
 
 	wg.Wait()
+}
+
+// startFuturesTrading initializes and starts the directional futures bot.
+func startFuturesTrading(ob *arbitrage.Orderbook) {
+	if futuresClient == nil {
+		logger.ErrorFmt("Futures client not initialized. Ensure FUTURES=true and credentials are set.")
+		return
+	}
+
+	FuturesBot = trading.NewFuturesBot(ob, cfg, futuresClient, &SimTradeLogger)
+
+	symbols := make([]string, 0, len(cfg.FuturesConfig.QuoteAssets))
+	for _, asset := range cfg.FuturesConfig.QuoteAssets {
+		if asset == "" {
+			continue
+		}
+		symbols = append(symbols, asset+cfg.FuturesConfig.BaseAsset)
+	}
+
+	if len(symbols) == 0 {
+		logger.WarningFmt("No futures symbols configured. Check FUTURES_QUOTE_ASSETS and FUTURES_BASE_ASSET.")
+		return
+	}
+
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+	errCh := make(chan error)
+
+	for i := 0; i < len(symbols); i++ {
+		symbol := symbols[i]
+		wg.Add(1)
+		go func(symbol string) {
+			defer wg.Done()
+			logger.InfoFmt("Starting futures websocket stream for %s.", symbol)
+			doneCh, stop, err := futures.WsBookTickerServe(
+				symbol,
+				func(event *futures.WsBookTickerEvent) {
+					book := &arbitrage.BookTicker{
+						AskPrice: event.BestAskPrice,
+						AskQty:   event.BestAskQty,
+						BidPrice: event.BestBidPrice,
+						BidQty:   event.BestBidQty,
+						UpdateID: event.TransactionTime,
+					}
+					_, _ = ob.UpdateBookTicker(event.Symbol, book)
+				},
+				func(err error) {
+					errCh <- err
+				},
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			select {
+			case <-stopCh:
+				stop <- struct{}{}
+			case <-doneCh:
+				return
+			}
+		}(symbol)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	time.Sleep(time.Millisecond * 15)
+	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Futures trading bot is running...")))
+	FuturesBot.Start(ctx)
+
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errCh:
+		logger.Error(err)
+		close(stopCh)
+		cancel()
+	case <-quitChannel:
+		logger.InfoFmt("Received interrupt signal. Closing futures streams...")
+		close(stopCh)
+		cancel()
+	}
+
+	wg.Wait()
+
+	// Log final simulation summary if in simulation mode
+	if cfg.GeneralConfig.SimulationMode && FuturesBot != nil {
+		FuturesBot.LogFinalSimulationSummary()
+	}
 }
 
 // startGridTrading initializes and starts the grid trading bot

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	futures "github.com/adshao/go-binance/v2/futures"
 	binance "github.com/binance/binance-connector-go"
 	"github.com/joho/godotenv"
 )
@@ -61,6 +62,7 @@ func main() {
 
 	apiKey := os.Getenv("BINANCE_API_KEY")
 	apiSecret := os.Getenv("BINANCE_SECRET_KEY")
+	isFutures := os.Getenv("FUTURES") == "true"
 	baseCoins := strings.Split(os.Getenv("BASE_ASSETS"), ",")
 	files := make(map[string]*os.File, len(baseCoins))
 
@@ -74,7 +76,7 @@ func main() {
 	}
 
 	// coins := currency.Currencies
-	tickersRes, err := GetTickers(apiKey, apiSecret)
+	tickersRes, err := GetTickers(apiKey, apiSecret, isFutures)
 	if err != nil {
 		fmt.Println("Error fetching tickers:", err)
 		return
@@ -126,16 +128,48 @@ func main() {
 	// }
 }
 
-func GetTickers(apiKey string, apiSecret string) (ticker *binance.ExchangeInfoResponse, err error) {
-	baseURL := "https://api.binance.com"
+type PopulatorSymbol struct {
+	Symbol string
+	Status string
+}
 
-	client := binance.NewClient(apiKey, apiSecret, baseURL)
+type PopulatorExchangeInfo struct {
+	Symbols []PopulatorSymbol
+}
 
-	ticker, err = client.NewExchangeInfoService().Do(context.Background())
+func GetTickers(apiKey string, apiSecret string, isFutures bool) (ticker *PopulatorExchangeInfo, err error) {
+	if isFutures {
+		fc := futures.NewClient(apiKey, apiSecret)
+		info, ferr := fc.NewExchangeInfoService().Do(context.Background())
+		if ferr != nil {
+			return nil, ferr
+		}
+
+		resp := &PopulatorExchangeInfo{Symbols: make([]PopulatorSymbol, 0, len(info.Symbols))}
+		for _, s := range info.Symbols {
+			resp.Symbols = append(resp.Symbols, PopulatorSymbol{
+				Symbol: s.Symbol,
+				Status: s.Status,
+			})
+		}
+		return resp, nil
+	}
+
+	client := binance.NewClient(apiKey, apiSecret)
+
+	spotInfo, err := client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
 	}
 
-	return
+	resp := &PopulatorExchangeInfo{Symbols: make([]PopulatorSymbol, 0, len(spotInfo.Symbols))}
+	for _, s := range spotInfo.Symbols {
+		resp.Symbols = append(resp.Symbols, PopulatorSymbol{
+			Symbol: s.Symbol,
+			Status: s.Status,
+		})
+	}
+
+	return resp, nil
 }

@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	futures "github.com/adshao/go-binance/v2/futures"
 	binance "github.com/binance/binance-connector-go"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/quagmt/udecimal"
@@ -21,6 +23,7 @@ type Orderbook struct {
 	Symbols       cmap.ConcurrentMap[string, *Symbol]
 	Config        *utils.Config
 	Client        *binance.Client
+	FuturesClient *futures.Client
 	TradeLogger   *zerolog.Logger
 	ExecutionLock sync.Mutex // Global lock to ensure only one triangle executes at a time
 	IsExecuting   bool       // Flag to indicate if a triangle is currently executing
@@ -64,6 +67,18 @@ type LotSize struct {
 	StepSize string
 }
 
+// getFilterString safely extracts a string from a futures filter map.
+func getFilterString(filter interface{}, key string) string {
+	if m, ok := filter.(map[string]interface{}); ok {
+		if v, ok := m[key]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 type BookTicker struct {
 	BidPrice string
 	BidQty   string
@@ -72,9 +87,9 @@ type BookTicker struct {
 	UpdateID int64
 }
 
-func New(cfg *utils.Config, client *binance.Client, tradeLogger *zerolog.Logger) *Orderbook {
+func New(cfg *utils.Config, client *binance.Client, futuresClient *futures.Client, tradeLogger *zerolog.Logger) *Orderbook {
 	symbols := cmap.New[*Symbol]()
-	return &Orderbook{Symbols: symbols, Config: cfg, Client: client, TradeLogger: tradeLogger}
+	return &Orderbook{Symbols: symbols, Config: cfg, Client: client, FuturesClient: futuresClient, TradeLogger: tradeLogger}
 }
 
 func (ob *Orderbook) Add(s *Symbol) {
@@ -275,13 +290,92 @@ func (ob *Orderbook) FindTriangles() []*Triangle {
 // 	}
 // }
 
-func FillOrderBook(client *binance.Client, cfg *utils.Config, tradeLogger *zerolog.Logger) (ob *Orderbook, err error) {
-	info, err := client.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
-		return nil, err
+func FillOrderBook(client *binance.Client, futuresClient *futures.Client, cfg *utils.Config, tradeLogger *zerolog.Logger) (ob *Orderbook, err error) {
+	ctx := context.Background()
+
+	if cfg.GeneralConfig.Futures && futuresClient == nil {
+		return nil, fmt.Errorf("futures client is nil while FUTURES=true")
 	}
 
-	ob = New(cfg, client, tradeLogger)
+	ob = New(cfg, client, futuresClient, tradeLogger)
+
+	if cfg.GeneralConfig.Futures {
+		info, ferr := futuresClient.NewExchangeInfoService().Do(ctx)
+		if ferr != nil {
+			return nil, ferr
+		}
+		for _, symbol := range info.Symbols {
+			if symbol.Status != "TRADING" {
+				continue
+			}
+
+			// Dynamically create pair from symbol string (e.g., "BTCUSDT" -> Base: BTC, Quote: USDT)
+			var pair currency.Pair
+			if existingPair, ok := currency.AllSymbols[symbol.Symbol]; ok {
+				pair = existingPair
+			} else {
+				// Try to parse symbol dynamically - futures typically end with USDT, USDC, BUSD, etc.
+				quoteAssets := []string{"USDT", "USDC", "BUSD", "BTC", "ETH", "BNB"}
+				found := false
+				for _, quoteAsset := range quoteAssets {
+					if strings.HasSuffix(symbol.Symbol, quoteAsset) {
+						baseSymbol := strings.TrimSuffix(symbol.Symbol, quoteAsset)
+						pair = currency.Pair{
+							Base:  currency.Currency{Symbol: baseSymbol},
+							Quote: currency.Currency{Symbol: quoteAsset},
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					// Skip if we can't parse the symbol
+					continue
+				}
+			}
+
+			f := ExchangeFilter{}
+			for _, filter := range symbol.Filters {
+				ft := getFilterString(filter, "filterType")
+				switch ft {
+				case "PRICE_FILTER":
+					f.MinPrice = getFilterString(filter, "minPrice")
+					f.MaxPrice = getFilterString(filter, "maxPrice")
+					f.TickSize = getFilterString(filter, "tickSize")
+				case "LOT_SIZE":
+					f.LotSize = LotSize{
+						MinQty:   getFilterString(filter, "minQty"),
+						MaxQty:   getFilterString(filter, "maxQty"),
+						StepSize: getFilterString(filter, "stepSize"),
+					}
+				case "MARKET_LOT_SIZE":
+					f.MarketLotSize = LotSize{
+						MinQty:   getFilterString(filter, "minQty"),
+						MaxQty:   getFilterString(filter, "maxQty"),
+						StepSize: getFilterString(filter, "stepSize"),
+					}
+				case "MIN_NOTIONAL", "NOTIONAL":
+					f.MinNotional = getFilterString(filter, "notional")
+				}
+			}
+
+			s := Symbol{
+				Pair:           pair,
+				BasePrecision:  int8(symbol.QuantityPrecision),
+				QuotePrecision: int8(symbol.PricePrecision),
+				Filter:         f,
+				Lock:           sync.Mutex{},
+			}
+
+			ob.Add(&s)
+		}
+		return ob, nil
+	}
+
+	info, serr := client.NewExchangeInfoService().Do(ctx)
+	if serr != nil {
+		return nil, serr
+	}
 
 	for _, symbol := range info.Symbols {
 		if _, ok := currency.AllSymbols[symbol.Symbol]; !ok {
@@ -338,7 +432,56 @@ func (ob *Orderbook) FillPrices() (added int, err error) {
 
 	file.WriteString("Symbol,BASE,QUOTE,basePrecision,quotePrecision,tickSize,stepSize,marketStepSize,minQty,marketMinQty,maxQty,marketMaxQty,minNotional,ASK,BID,updatedAt\n")
 
-	res, err := ob.Client.NewTickerBookTickerService().Do(context.Background())
+	ctx := context.Background()
+
+	if ob.Config.GeneralConfig.Futures {
+		if ob.FuturesClient == nil {
+			return 0, fmt.Errorf("futures client is nil while filling futures prices")
+		}
+		res, ferr := ob.FuturesClient.NewListBookTickersService().Do(ctx)
+		if ferr != nil {
+			return 0, ferr
+		}
+
+		for _, symbol := range res {
+			// For futures, check if symbol exists in orderbook (it should if FillOrderBook worked)
+			pairData, ok := ob.Symbols.Get(symbol.Symbol)
+			if !ok {
+				continue
+			}
+			// Futures BookTicker from REST API has AskPrice, BidPrice (qty may not be available)
+			book := &BookTicker{
+				AskPrice: symbol.AskPrice,
+				AskQty:   "0", // Quantity not available in REST API BookTicker
+				BidPrice: symbol.BidPrice,
+				BidQty:   "0", // Quantity not available in REST API BookTicker
+				UpdateID: 0,
+			}
+
+			ob.UpdateBookTicker(symbol.Symbol, book)
+			fmt.Fprintf(file, "%s,%s,%s,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+				symbol.Symbol,
+				pairData.Pair.Base,
+				pairData.Pair.Quote,
+				pairData.BasePrecision,
+				pairData.QuotePrecision,
+				pairData.Filter.TickSize,
+				pairData.Filter.LotSize.StepSize,
+				pairData.Filter.MarketLotSize.StepSize,
+				pairData.Filter.LotSize.MinQty,
+				pairData.Filter.MarketLotSize.MinQty,
+				pairData.Filter.LotSize.MaxQty,
+				pairData.Filter.MarketLotSize.MaxQty,
+				pairData.Filter.MinNotional,
+				book.AskPrice,
+				book.BidPrice,
+				pairData.LastUpdated.Format("2006-01-02 15:04:05"))
+			added++
+		}
+		return added, nil
+	}
+
+	res, err := ob.Client.NewTickerBookTickerService().Do(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -381,7 +524,49 @@ func (ob *Orderbook) FillPrices() (added int, err error) {
 }
 
 func (ob *Orderbook) UpdatePrices() (updated int, err error) {
-	res, err := ob.Client.NewTickerBookTickerService().Do(context.Background())
+	ctx := context.Background()
+
+	if ob.Config.GeneralConfig.Futures {
+		if ob.FuturesClient == nil {
+			return 0, fmt.Errorf("futures client is nil while updating futures prices")
+		}
+		res, ferr := ob.FuturesClient.NewListBookTickersService().Do(ctx)
+		if ferr != nil {
+			return 0, ferr
+		}
+
+		for _, symbol := range res {
+			if val, ok := ob.Symbols.Get(symbol.Symbol); ok {
+				bookTicker := val.GetBookTicker()
+				// Futures BookTicker from REST API has AskPrice, BidPrice (qty may not be available)
+				if bookTicker == nil || (bookTicker.AskPrice != symbol.AskPrice || bookTicker.BidPrice != symbol.BidPrice) {
+					var updateId int64
+					if bookTicker != nil {
+						updateId = bookTicker.UpdateID + 1
+					} else {
+						updateId = 0
+					}
+					book := &BookTicker{
+						AskPrice: symbol.AskPrice,
+						AskQty:   "0", // Quantity not available in REST API BookTicker
+						BidPrice: symbol.BidPrice,
+						BidQty:   "0", // Quantity not available in REST API BookTicker
+						UpdateID: updateId,
+					}
+
+					_, err := ob.UpdateBookTicker(symbol.Symbol, book)
+					if err != nil {
+						return updated, err
+					}
+
+					updated++
+				}
+			}
+		}
+		return updated, nil
+	}
+
+	res, err := ob.Client.NewTickerBookTickerService().Do(ctx)
 	if err != nil {
 		return 0, err
 	}
