@@ -1,15 +1,13 @@
 {
-    "mcpServers": {
-      "cursor10x-mcp": {
-        "type": "stdio",
-        "command": "pnpx",
-        "args": ["cursor10x-mcp"],
-        "enabled": true,
-        "env": {
-          "TURSO_DATABASE_URL": "${env:TURSO_DATABASE_URL}",
-          "TURSO_AUTH_TOKEN": "${env:TURSO_AUTH_TOKEN}"
-        },
-        "envFile": "${workspaceFolder}/.env.cursor"
+  "mcpServers": {
+    "devcontext": {
+      "command": "npx",
+      "args": ["-y", "devcontext@latest"],
+      "enabled": true,
+      "env": {
+        "TURSO_DATABASE_URL": "libsql://devcontext-matronator.aws-eu-west-1.turso.io",
+        "TURSO_AUTH_TOKEN": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3NjU0NjE0ODMsImlkIjoiODczZDBjZTMtZWIwYS00MGQwLTkyNzktNzk4MGIwODUzYzk1IiwicmlkIjoiNGIwYTIxMzUtMTU2Yy00YmVhLWI4NzItMmMwZTM5MDg3NzI3In0.RhLmE2Yn_LEOujGnb_RFI3iNL4v3v1cdfRKNlMppcxYFEkbIwsQ8VLwPv-t9vgVen7OEZN6u58xCE0yTYFReAg"
       }
     }
   }
+}

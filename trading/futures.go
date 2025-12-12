@@ -144,9 +144,7 @@ func (fb *FuturesBot) loop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			logger.InfoFmt("Futures bot loop stopped after %d cycles", cycleCount)
-			if fb.cfg.GeneralConfig.SimulationMode {
-				fb.LogFinalSimulationSummary()
-			}
+			// Don't log final summary here - it will be logged in main.go shutdown handler
 			return
 		case <-ticker.C:
 			cycleCount++
@@ -157,8 +155,11 @@ func (fb *FuturesBot) loop(ctx context.Context) {
 				fb.mu.RLock()
 				openPositions := len(fb.positions)
 				totalHistoryPoints := 0
-				for _, h := range fb.history {
-					totalHistoryPoints += len(h)
+				symbolHistoryDetails := make(map[string]int)
+				for symbolStr, h := range fb.history {
+					count := len(h)
+					totalHistoryPoints += count
+					symbolHistoryDetails[symbolStr] = count
 				}
 				avgHistoryPoints := 0
 				if len(fb.history) > 0 {
@@ -168,6 +169,12 @@ func (fb *FuturesBot) loop(ctx context.Context) {
 
 				logger.InfoFmt("Futures bot status: cycle=%d, open_positions=%d/%d, avg_history_points=%d/%d",
 					cycleCount, openPositions, fb.cfg.FuturesConfig.MaxPositions, avgHistoryPoints, fb.cfg.FuturesConfig.LookbackPoints)
+
+				// Log history details for each symbol
+				for symbolStr, count := range symbolHistoryDetails {
+					logger.InfoFmt("  %s: %d history points (need %d)", symbolStr, count, fb.cfg.FuturesConfig.LookbackPoints)
+				}
+
 				lastStatusLog = time.Now()
 			}
 		}
@@ -216,14 +223,26 @@ func (fb *FuturesBot) updatePriceHistory() int {
 			continue
 		}
 
-		fb.history[symbolStr] = append(fb.history[symbolStr], PricePoint{
-			BidPrice:  book.BidPrice,
-			AskPrice:  book.AskPrice,
-			Timestamp: time.Now(),
-		})
+		// Only add price point if price has changed (avoid duplicate entries)
+		history := fb.history[symbolStr]
+		shouldAdd := true
+		if len(history) > 0 {
+			lastPoint := history[len(history)-1]
+			if lastPoint.BidPrice == book.BidPrice && lastPoint.AskPrice == book.AskPrice {
+				shouldAdd = false
+			}
+		}
 
-		if len(fb.history[symbolStr]) > 120 {
-			fb.history[symbolStr] = fb.history[symbolStr][1:]
+		if shouldAdd {
+			fb.history[symbolStr] = append(fb.history[symbolStr], PricePoint{
+				BidPrice:  book.BidPrice,
+				AskPrice:  book.AskPrice,
+				Timestamp: time.Now(),
+			})
+
+			if len(fb.history[symbolStr]) > 120 {
+				fb.history[symbolStr] = fb.history[symbolStr][1:]
+			}
 		}
 
 		updated++
@@ -402,19 +421,21 @@ func (fb *FuturesBot) scanForEntries() int {
 		changePercent := change.Mul(udecimal.MustFromFloat64(100))
 		threshold := udecimal.MustFromFloat64(fb.cfg.FuturesConfig.EntryChange)
 		thresholdPercent := threshold.Mul(udecimal.MustFromFloat64(100))
+		changeFloat := changePercent.InexactFloat64()
+		thresholdFloat := thresholdPercent.InexactFloat64()
 
-		if fb.cfg.GeneralConfig.VerboseLogging {
-			logger.DebugFmt("Analyzed %s: momentum=%.4f%%, threshold=%.4f%%", symbolStr, changePercent.InexactFloat64(), thresholdPercent.InexactFloat64())
-		}
+		// Always log momentum analysis for debugging
+		logger.InfoFmt("Momentum analysis for %s: change=%.4f%%, threshold=±%.4f%%, history_points=%d",
+			symbolStr, changeFloat, thresholdFloat, len(history))
 
 		if change.Cmp(threshold) >= 0 {
-			logger.InfoFmt("LONG signal detected for %s: momentum=%.4f%% >= threshold=%.4f%%", symbolStr, changePercent.InexactFloat64(), thresholdPercent.InexactFloat64())
+			logger.InfoFmt("LONG signal detected for %s: momentum=%.4f%% >= threshold=%.4f%%", symbolStr, changeFloat, thresholdFloat)
 			fb.openPosition(symbol, "LONG")
 		} else if change.Cmp(threshold.Neg()) <= 0 {
-			logger.InfoFmt("SHORT signal detected for %s: momentum=%.4f%% <= threshold=%.4f%%", symbolStr, changePercent.InexactFloat64(), -thresholdPercent.InexactFloat64())
+			logger.InfoFmt("SHORT signal detected for %s: momentum=%.4f%% <= threshold=%.4f%%", symbolStr, changeFloat, -thresholdFloat)
 			fb.openPosition(symbol, "SHORT")
-		} else if fb.cfg.GeneralConfig.VerboseLogging {
-			logger.DebugFmt("No entry signal for %s: momentum=%.4f%% (threshold: ±%.4f%%)", symbolStr, changePercent.InexactFloat64(), thresholdPercent.InexactFloat64())
+		} else {
+			logger.DebugFmt("No entry signal for %s: momentum=%.4f%% (threshold: ±%.4f%%)", symbolStr, changeFloat, thresholdFloat)
 		}
 	}
 
@@ -431,15 +452,24 @@ func (fb *FuturesBot) analyzeMomentum(history []PricePoint) (udecimal.Decimal, e
 		return udecimal.MustFromFloat64(0), fmt.Errorf("insufficient history")
 	}
 
-	startIdx := max(len(history)-fb.cfg.FuturesConfig.LookbackPoints, 0)
+	// Use the configured lookback points, but ensure we have enough data
+	lookback := fb.cfg.FuturesConfig.LookbackPoints
+	if lookback > len(history) {
+		lookback = len(history)
+	}
+	if lookback < 2 {
+		lookback = 2
+	}
+
+	startIdx := len(history) - lookback
 
 	first, err := midPriceFromPoint(history[startIdx])
 	if err != nil {
-		return udecimal.MustFromFloat64(0), err
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first price: %w", err)
 	}
 	last, err := midPriceFromPoint(history[len(history)-1])
 	if err != nil {
-		return udecimal.MustFromFloat64(0), err
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last price: %w", err)
 	}
 
 	if first.IsZero() {
@@ -448,8 +478,18 @@ func (fb *FuturesBot) analyzeMomentum(history []PricePoint) (udecimal.Decimal, e
 
 	change, err := last.Sub(first).Div(first)
 	if err != nil {
-		return udecimal.MustFromFloat64(0), err
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate change: %w", err)
 	}
+
+	// Log detailed momentum analysis if verbose
+	if fb.cfg.GeneralConfig.VerboseLogging {
+		firstPrice := first.InexactFloat64()
+		lastPrice := last.InexactFloat64()
+		changePercent := change.Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
+		logger.DebugFmt("Momentum analysis: first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
+			firstPrice, lastPrice, changePercent, lookback)
+	}
+
 	return change, nil
 }
 
@@ -812,7 +852,15 @@ func (fb *FuturesBot) LogFinalSimulationSummary() {
 	logger.InfoFmt("=== FUTURES SIMULATION FINAL SUMMARY ===")
 	logger.InfoFmt("Total Trades: %d (Wins: %d, Losses: %d, Win Rate: %.2f%%)",
 		fb.simStats.TotalTrades, fb.simStats.WinningTrades, fb.simStats.LosingTrades, winRate.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
-	logger.InfoFmt("Total P&L: %s USDT (%.4f%%)", fb.simStats.TotalPnL.StringFixed(4), fb.simStats.TotalPnLPercent.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+
+	totalPnLPercent := udecimal.Zero
+	if !fb.simStats.TotalVolume.IsZero() {
+		if pnlPct, err := fb.simStats.TotalPnL.Div(fb.simStats.TotalVolume); err == nil {
+			totalPnLPercent = pnlPct
+		}
+	}
+
+	logger.InfoFmt("Total P&L: %s USDT (%.4f%%)", fb.simStats.TotalPnL.StringFixed(4), totalPnLPercent.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 	logger.InfoFmt("Average P&L per Trade: %s USDT", avgPnL.StringFixed(4))
 	logger.InfoFmt("Best Trade: %s USDT | Worst Trade: %s USDT", fb.simStats.BestTradePnL.StringFixed(4), fb.simStats.WorstTradePnL.StringFixed(4))
 	logger.InfoFmt("Total Volume: %s USDT", fb.simStats.TotalVolume.StringFixed(2))
