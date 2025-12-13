@@ -31,6 +31,7 @@ var SimTradeLogger zerolog.Logger
 var GridBot *grid.GridTradingBot
 var TradingBot *trading.TradingBot
 var FuturesBot *trading.FuturesBot
+var MarginBot *trading.MarginBot
 
 func main() {
 	cmd := exec.Command("scripts/populator")
@@ -95,6 +96,9 @@ func main() {
 	case "futures":
 		logger.InfoFmt("%s", logger.Green("Starting Futures Trading Mode..."))
 		startFuturesTrading(OrderBook)
+	case "margin":
+		logger.InfoFmt("%s", logger.Green("Starting Margin Trading Mode..."))
+		startMarginTrading(OrderBook)
 	case "normal":
 		logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
 		startNormalTrading(OrderBook)
@@ -275,6 +279,89 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 	// Log final simulation summary if in simulation mode
 	if cfg.GeneralConfig.SimulationMode && FuturesBot != nil {
 		FuturesBot.LogFinalSimulationSummary()
+	}
+}
+
+// startMarginTrading initializes and starts the directional margin bot.
+func startMarginTrading(ob *arbitrage.Orderbook) {
+	if client == nil {
+		logger.ErrorFmt("Spot client not initialized. Ensure credentials are set.")
+		return
+	}
+
+	MarginBot = trading.NewMarginBot(ob, cfg, client, &SimTradeLogger)
+
+	symbols := make([]string, 0, len(cfg.MarginConfig.QuoteAssets))
+	for _, asset := range cfg.MarginConfig.QuoteAssets {
+		if asset == "" {
+			continue
+		}
+		symbols = append(symbols, asset+cfg.MarginConfig.BaseAsset)
+	}
+
+	if len(symbols) == 0 {
+		logger.WarningFmt("No margin symbols configured. Check MARGIN_QUOTE_ASSETS and MARGIN_BASE_ASSET.")
+		return
+	}
+
+	websocketStreamClient := binance.NewWebsocketStreamClient(false)
+	handler := NewBookTickerHandler(ob)
+
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+	errCh := make(chan error)
+
+	for i := 0; i < len(symbols); i++ {
+		symbol := symbols[i]
+		wg.Add(1)
+		go func(symbol string) {
+			defer wg.Done()
+			logger.InfoFmt("Starting margin websocket stream for %s.", symbol)
+			doneCh, stop, err := websocketStreamClient.WsBookTickerServe(
+				symbol,
+				handler.HandleBookTickerEvent,
+				handler.HandleError,
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			select {
+			case <-stopCh:
+				stop <- struct{}{}
+			case <-doneCh:
+				return
+			}
+		}(symbol)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	time.Sleep(time.Millisecond * 15)
+	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Margin trading bot is running...")))
+	MarginBot.Start(ctx)
+
+	quitChannel := make(chan os.Signal, 1)
+	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errCh:
+		logger.Error(err)
+		close(stopCh)
+		cancel()
+	case <-quitChannel:
+		logger.InfoFmt("Received interrupt signal. Closing margin streams...")
+		close(stopCh)
+		cancel()
+	}
+
+	wg.Wait()
+
+	// Log final simulation summary if in simulation mode
+	if cfg.GeneralConfig.SimulationMode && MarginBot != nil {
+		MarginBot.LogFinalSimulationSummary()
 	}
 }
 

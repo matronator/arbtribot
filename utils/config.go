@@ -15,6 +15,7 @@ type Config struct {
 	TriangleConfig *TriangleConfig
 	NormalConfig   *TradingConfig
 	FuturesConfig  *FuturesConfig
+	MarginConfig   *MarginConfig
 }
 
 type GeneralConfig struct {
@@ -72,6 +73,21 @@ type FuturesConfig struct {
 	QuoteAssets      []string // Coins to trade against the base asset
 }
 
+// MarginConfig holds configuration for spot margin trading strategy.
+type MarginConfig struct {
+	USDTPositionSize float64  // Notional size per position (in USDT)
+	MaxPositions     int      // Maximum concurrent margin positions
+	StopLoss         float64  // Max loss (as fraction) before closing
+	TrailingStart    float64  // Profit threshold that enables trailing exit
+	TrailingGap      float64  // Allowed pullback (as fraction) after trailing start
+	EntryChange      float64  // Minimum absolute price move to open a position
+	LookbackPoints   int      // History points to evaluate momentum
+	CheckInterval    int      // Seconds between evaluation cycles
+	BaseAsset        string   // Margin quote asset, e.g., USDT
+	QuoteAssets      []string // Coins to trade against the base asset
+	MarginType       string   // "ISOLATED" or "CROSS" margin type
+}
+
 func LoadConfig() *Config {
 	err := godotenv.Load(".env")
 	if err != nil {
@@ -125,6 +141,19 @@ func LoadConfig() *Config {
 				CheckInterval:    5,
 				BaseAsset:        "USDT",
 				QuoteAssets:      []string{"BTC", "ETH", "BNB"},
+			},
+			MarginConfig: &MarginConfig{
+				USDTPositionSize: 25,
+				MaxPositions:     3,
+				StopLoss:         0.01,
+				TrailingStart:    0.015,
+				TrailingGap:      0.004,
+				EntryChange:      0.006,
+				LookbackPoints:   20,
+				CheckInterval:    5,
+				BaseAsset:        "USDT",
+				QuoteAssets:      []string{"BTC", "ETH", "BNB"},
+				MarginType:       "ISOLATED",
 			},
 		}
 	}
@@ -286,6 +315,74 @@ func LoadConfig() *Config {
 		futuresQuoteAssets = []string{"BTC", "ETH", "BNB"}
 	}
 
+	// Parse margin trading configs
+	marginPositionSize, err := strconv.ParseFloat(os.Getenv("MARGIN_USDT_POSITION_SIZE"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_USDT_POSITION_SIZE from .env file, using default 25 USDT")
+		marginPositionSize = 25
+	}
+
+	marginMaxPositions, err := strconv.Atoi(os.Getenv("MARGIN_MAX_POSITIONS"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_MAX_POSITIONS from .env file, using default 3")
+		marginMaxPositions = 3
+	}
+
+	marginStopLoss, err := strconv.ParseFloat(os.Getenv("MARGIN_STOP_LOSS"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_STOP_LOSS from .env file, using default 0.01 (1%)")
+		marginStopLoss = 0.01
+	}
+
+	marginTrailingStart, err := strconv.ParseFloat(os.Getenv("MARGIN_TRAILING_START"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_TRAILING_START from .env file, using default 0.015 (1.5%)")
+		marginTrailingStart = 0.015
+	}
+
+	marginTrailingGap, err := strconv.ParseFloat(os.Getenv("MARGIN_TRAILING_GAP"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_TRAILING_GAP from .env file, using default 0.004 (0.4%)")
+		marginTrailingGap = 0.004
+	}
+
+	marginEntryChange, err := strconv.ParseFloat(os.Getenv("MARGIN_ENTRY_CHANGE"), 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_ENTRY_CHANGE from .env file, using default 0.006 (0.6%)")
+		marginEntryChange = 0.006
+	}
+
+	marginLookbackPoints, err := strconv.Atoi(os.Getenv("MARGIN_LOOKBACK_POINTS"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_LOOKBACK_POINTS from .env file, using default 20")
+		marginLookbackPoints = 20
+	}
+
+	marginCheckInterval, err := strconv.Atoi(os.Getenv("MARGIN_CHECK_INTERVAL"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_CHECK_INTERVAL from .env file, using default 5 seconds")
+		marginCheckInterval = 5
+	}
+
+	marginBaseAsset := os.Getenv("MARGIN_BASE_ASSET")
+	if marginBaseAsset == "" {
+		marginBaseAsset = "USDT"
+	}
+
+	marginQuoteAssets := strings.Split(os.Getenv("MARGIN_QUOTE_ASSETS"), ",")
+	if len(marginQuoteAssets) == 1 && marginQuoteAssets[0] == "" {
+		marginQuoteAssets = []string{"BTC", "ETH", "BNB"}
+	}
+
+	marginType := os.Getenv("MARGIN_TYPE")
+	if marginType == "" {
+		marginType = "ISOLATED"
+	}
+	if marginType != "ISOLATED" && marginType != "CROSS" {
+		log.Warn().Msg("Invalid MARGIN_TYPE, must be ISOLATED or CROSS. Using default ISOLATED")
+		marginType = "ISOLATED"
+	}
+
 	return &Config{
 		GeneralConfig: &GeneralConfig{
 			SimulationMode: os.Getenv("SIMULATION_MODE") == "true",
@@ -335,6 +432,19 @@ func LoadConfig() *Config {
 			CheckInterval:    futuresCheckInterval,
 			BaseAsset:        futuresBaseAsset,
 			QuoteAssets:      futuresQuoteAssets,
+		},
+		MarginConfig: &MarginConfig{
+			USDTPositionSize: marginPositionSize,
+			MaxPositions:     marginMaxPositions,
+			StopLoss:         marginStopLoss,
+			TrailingStart:    marginTrailingStart,
+			TrailingGap:      marginTrailingGap,
+			EntryChange:      marginEntryChange,
+			LookbackPoints:   marginLookbackPoints,
+			CheckInterval:    marginCheckInterval,
+			BaseAsset:        marginBaseAsset,
+			QuoteAssets:      marginQuoteAssets,
+			MarginType:       marginType,
 		},
 	}
 }
