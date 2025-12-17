@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,16 +32,17 @@ type MarginPosition struct {
 }
 
 type MarginBot struct {
-	ob             *arbitrage.Orderbook
-	cfg            *utils.Config
-	tradeLogger    *zerolog.Logger
-	simLogger      *zerolog.Logger
-	client         *binance.Client
-	trackedSymbols []currency.Pair
-	positions      map[string]*MarginPosition
-	history        map[string][]PricePoint
-	simStats       *SimulationStats
-	mu             sync.RWMutex
+	ob                 *arbitrage.Orderbook
+	cfg                *utils.Config
+	tradeLogger        *zerolog.Logger
+	simLogger          *zerolog.Logger
+	client             *binance.Client
+	trackedSymbols     []currency.Pair
+	positions          map[string]*MarginPosition
+	history            map[string][]PricePoint
+	simStats           *SimulationStats
+	unsupportedSymbols map[string]string // Maps symbol to reason (e.g., "MARGIN_NOT_ALLOWED", "ISOLATED_ACCOUNT_MISSING", "MARGIN_ACCOUNT_MISSING")
+	mu                 sync.RWMutex
 }
 
 func NewMarginBot(ob *arbitrage.Orderbook, cfg *utils.Config, client *binance.Client, tradeLogger *zerolog.Logger) *MarginBot {
@@ -95,21 +97,37 @@ func NewMarginBot(ob *arbitrage.Orderbook, cfg *utils.Config, client *binance.Cl
 
 	logger.InfoFmt("Margin bot initialized: tracking %d symbols, max positions=%d, entry threshold=%.2f%%, stop loss=%.2f%%, margin type=%s",
 		len(tracked), cfg.MarginConfig.MaxPositions, cfg.MarginConfig.EntryChange*100, cfg.MarginConfig.StopLoss*100, cfg.MarginConfig.MarginType)
-	for _, pair := range tracked {
-		logger.InfoFmt("  - Tracking: %s", pair.String())
-	}
+	symbolsStr := strings.Join(func() []string {
+		symbols := make([]string, len(tracked))
+		for i, p := range tracked {
+			symbols[i] = p.String()
+		}
+		return symbols
+	}(), ", ")
+	logger.InfoFmt("Tracked symbols: %s", symbolsStr)
 
 	return &MarginBot{
-		ob:             ob,
-		cfg:            cfg,
-		tradeLogger:    tradeLogger,
-		simLogger:      simLogger,
-		client:         client,
-		trackedSymbols: tracked,
-		positions:      positions,
-		history:        history,
-		simStats:       simStats,
+		ob:                 ob,
+		cfg:                cfg,
+		tradeLogger:        tradeLogger,
+		simLogger:          simLogger,
+		client:             client,
+		trackedSymbols:     tracked,
+		positions:          positions,
+		history:            history,
+		simStats:           simStats,
+		unsupportedSymbols: make(map[string]string),
 	}
+}
+
+// Positions returns the positions map (for persistence)
+func (mb *MarginBot) Positions() map[string]*MarginPosition {
+	return mb.positions
+}
+
+// Mu returns the mutex (for thread-safe access)
+func (mb *MarginBot) Mu() *sync.RWMutex {
+	return &mb.mu
 }
 
 func (mb *MarginBot) Start(ctx context.Context) {
@@ -124,7 +142,6 @@ func (mb *MarginBot) loop(ctx context.Context) {
 	logger.InfoFmt("Margin bot loop started: check interval=%v, tracking %d symbols", interval, len(mb.trackedSymbols))
 
 	cycleCount := 0
-	lastStatusLog := time.Now()
 
 	for {
 		select {
@@ -134,34 +151,6 @@ func (mb *MarginBot) loop(ctx context.Context) {
 		case <-ticker.C:
 			cycleCount++
 			mb.processCycle()
-
-			// Log periodic status every 12 cycles (1 minute if 5s interval)
-			if time.Since(lastStatusLog) > 60*time.Second {
-				mb.mu.RLock()
-				openPositions := len(mb.positions)
-				totalHistoryPoints := 0
-				symbolHistoryDetails := make(map[string]int)
-				for symbolStr, h := range mb.history {
-					count := len(h)
-					totalHistoryPoints += count
-					symbolHistoryDetails[symbolStr] = count
-				}
-				avgHistoryPoints := 0
-				if len(mb.history) > 0 {
-					avgHistoryPoints = totalHistoryPoints / len(mb.history)
-				}
-				mb.mu.RUnlock()
-
-				logger.InfoFmt("Margin bot status: cycle=%d, open_positions=%d/%d, avg_history_points=%d/%d",
-					cycleCount, openPositions, mb.cfg.MarginConfig.MaxPositions, avgHistoryPoints, mb.cfg.MarginConfig.LookbackPoints)
-
-				// Log history details for each symbol
-				for symbolStr, count := range symbolHistoryDetails {
-					logger.InfoFmt("  %s: %d history points (need %d)", symbolStr, count, mb.cfg.MarginConfig.LookbackPoints)
-				}
-
-				lastStatusLog = time.Now()
-			}
 		}
 	}
 }
@@ -322,27 +311,35 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		}
 
 		holdDuration := time.Since(position.EntryTime)
-		pnlPercent := effectivePnL.Mul(udecimal.MustFromFloat64(100))
+		effectivePnL.Mul(udecimal.MustFromFloat64(100))
 
 		if mb.cfg.GeneralConfig.VerboseLogging {
-			logger.DebugFmt("Position %s %s: entry=%s current=%s P&L=%.4f%% hold=%v",
+			logger.DebugFmt("Position %s %s: entry=%s current=%s P&L=%s%% hold=%v",
 				symbolStr, position.Side, position.EntryPrice.String(), currentPrice.String(),
-				pnlPercent.InexactFloat64(), holdDuration.Round(time.Second))
+				logger.ColorizePnl(effectivePnL), holdDuration.Round(time.Second))
 		}
 
 		// Stop loss
 		stopLossThreshold := udecimal.MustFromFloat64(-mb.cfg.MarginConfig.StopLoss)
 		if effectivePnL.Cmp(stopLossThreshold) <= 0 {
-			logger.InfoFmt("Stop loss triggered for %s: P&L=%.4f%% <= %.4f%%", symbolStr, pnlPercent.InexactFloat64(), stopLossThreshold.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+			logger.InfoFmt("Stop loss triggered for %s: P&L=%s <= %.4f%%", symbolStr, logger.ColorizePnl(effectivePnL), stopLossThreshold.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 			mb.closePosition(symbolStr, currentPrice, "STOP_LOSS")
 			continue
 		}
 
 		// Time-based exit
+		// Only close on timeout if position is profitable (P&L > 0)
+		// If losing money, keep it open unless stop loss is reached
 		maxHoldTime := time.Duration(mb.cfg.NormalConfig.MaxHoldTime) * time.Minute
 		if holdDuration > maxHoldTime {
-			logger.InfoFmt("Max hold time reached for %s: %v > %v", symbolStr, holdDuration, maxHoldTime)
-			mb.closePosition(symbolStr, currentPrice, "TIMEOUT")
+			if effectivePnL.Cmp(udecimal.Zero) > 0 {
+				logger.InfoFmt("Max hold time reached for %s with positive P&L (%s). Closing position.", symbolStr, logger.ColorizePnl(effectivePnL))
+				mb.closePosition(symbolStr, currentPrice, "TIMEOUT")
+			} else {
+				if mb.cfg.GeneralConfig.VerboseLogging {
+					logger.DebugFmt("Max hold time reached for %s but position is unprofitable (P&L=%s). Keeping position open until stop loss.", symbolStr, logger.ColorizePnl(effectivePnL))
+				}
+			}
 			continue
 		}
 
@@ -350,7 +347,7 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		profitTarget := udecimal.MustFromFloat64(mb.cfg.MarginConfig.TrailingStart)
 		if effectivePnL.Cmp(profitTarget) >= 0 {
 			if mb.shouldTriggerTrail(position, currentPrice) {
-				logger.InfoFmt("Trailing exit triggered for %s: P&L=%.4f%% >= %.4f%%", symbolStr, pnlPercent.InexactFloat64(), profitTarget.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+				logger.InfoFmt("Trailing exit triggered for %s: P&L=%s >= %.4f%%", symbolStr, logger.ColorizePnl(effectivePnL), profitTarget.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 				mb.closePosition(symbolStr, currentPrice, "TRAILING_EXIT")
 				continue
 			} else if mb.cfg.GeneralConfig.VerboseLogging {
@@ -427,17 +424,17 @@ func (mb *MarginBot) scanForEntries() int {
 		thresholdFloat := thresholdPercent.InexactFloat64()
 
 		// Always log momentum analysis for debugging
-		logger.InfoFmt("Momentum analysis for %s: change=%.4f%%, threshold=±%.4f%%, history_points=%d",
-			symbolStr, changeFloat, thresholdFloat, len(history))
+		if mb.cfg.GeneralConfig.VerboseLogging {
+			logger.DebugFmt("Momentum analysis for %s: change=%.4f%%, threshold=±%.4f%%, history_points=%d",
+				symbolStr, changeFloat, thresholdFloat, len(history))
+		}
 
 		if change.Cmp(threshold) >= 0 {
-			logger.InfoFmt("LONG signal detected for %s: momentum=%.4f%% >= threshold=%.4f%%", symbolStr, changeFloat, thresholdFloat)
+			logger.InfoFmt("%s signal detected for %s: momentum=%.4f%% >= threshold=%.4f%%", logger.BgGreen(" LONG "), symbolStr, changeFloat, thresholdFloat)
 			mb.openPosition(symbol, "LONG")
 		} else if change.Cmp(threshold.Neg()) <= 0 {
-			logger.InfoFmt("SHORT signal detected for %s: momentum=%.4f%% <= threshold=%.4f%%", symbolStr, changeFloat, -thresholdFloat)
+			logger.InfoFmt("%s signal detected for %s: momentum=%.4f%% <= threshold=%.4f%%", logger.BgRed(" SHORT "), symbolStr, changeFloat, -thresholdFloat)
 			mb.openPosition(symbol, "SHORT")
-		} else {
-			logger.DebugFmt("No entry signal for %s: momentum=%.4f%% (threshold: ±%.4f%%)", symbolStr, changeFloat, thresholdFloat)
 		}
 	}
 
@@ -455,10 +452,7 @@ func (mb *MarginBot) analyzeMomentum(history []PricePoint) (udecimal.Decimal, er
 	}
 
 	// Use the configured lookback points, but ensure we have enough data
-	lookback := mb.cfg.MarginConfig.LookbackPoints
-	if lookback > len(history) {
-		lookback = len(history)
-	}
+	lookback := min(mb.cfg.MarginConfig.LookbackPoints, len(history))
 	if lookback < 2 {
 		lookback = 2
 	}
@@ -495,10 +489,51 @@ func (mb *MarginBot) analyzeMomentum(history []PricePoint) (udecimal.Decimal, er
 	return change, nil
 }
 
+// isMarginErrorPermanent checks if an error indicates that margin trading is permanently unavailable for this symbol
+func (mb *MarginBot) isMarginErrorPermanent(err error) (bool, string) {
+	errStr := err.Error()
+
+	// Error code -3021: Margin account are not allowed to trade this trading pair
+	if strings.Contains(errStr, "-3021") || strings.Contains(errStr, "not allowed to trade this trading pair") {
+		return true, "MARGIN_NOT_ALLOWED"
+	}
+
+	// Error code -11001: Isolated margin account does not exist
+	if strings.Contains(errStr, "-11001") || strings.Contains(errStr, "Isolated margin account does not exist") {
+		return true, "ISOLATED_ACCOUNT_MISSING"
+	}
+
+	// Error code -3003: Margin account does not exist
+	if strings.Contains(errStr, "-3003") || strings.Contains(errStr, "Margin account does not exist") {
+		return true, "MARGIN_ACCOUNT_MISSING"
+	}
+
+	return false, ""
+}
+
 func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
-	symbolData, ok := mb.ob.Symbols.Get(symbol.String())
+	// Add panic recovery to prevent crashes
+	defer func() {
+		if r := recover(); r != nil {
+			logger.ErrorFmt("Panic recovered in openPosition for %s %s: %v", side, symbol.String(), r)
+		}
+	}()
+
+	symbolStr := symbol.String()
+
+	// Check if this symbol is already marked as unsupported
+	// Note: This function is called from processCycle() which already holds mb.mu.Lock(),
+	// so we can access unsupportedSymbols directly without additional locking
+	if reason, exists := mb.unsupportedSymbols[symbolStr]; exists {
+		if mb.cfg.GeneralConfig.VerboseLogging {
+			logger.DebugFmt("Skipping %s %s: symbol marked as unsupported (%s)", side, symbolStr, reason)
+		}
+		return
+	}
+
+	symbolData, ok := mb.ob.Symbols.Get(symbolStr)
 	if !ok {
-		logger.WarningFmt("Symbol %s not found for margin entry", symbol.String())
+		logger.WarningFmt("Symbol %s not found for margin entry", symbolStr)
 		return
 	}
 
@@ -509,19 +544,97 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 
 	entryPrice, err := midPrice(book)
 	if err != nil {
-		logger.ErrorFmt("Failed to parse entry price for %s: %v", symbol.String(), err)
+		logger.ErrorFmt("Failed to parse entry price for %s: %v", symbolStr, err)
 		return
 	}
 
+	// Calculate quantity: for both LONG and SHORT, we want to invest USDCPositionSize worth
+	// LONG: buy base asset with USDC, quantity = USDC / price
+	// SHORT: borrow and sell base asset for USDC, quantity = USDC / price (same calculation)
 	rawQty, err := udecimal.MustFromFloat64(mb.cfg.MarginConfig.USDTPositionSize).Div(entryPrice)
 	if err != nil {
-		logger.ErrorFmt("Failed to derive raw quantity for %s: %v", symbol.String(), err)
+		logger.ErrorFmt("Failed to derive raw quantity for %s: %v", symbolStr, err)
 		return
 	}
 	validatedQty, err := arbitrage.StepSizeQuantity(symbolData, rawQty)
 	if err != nil {
-		logger.ErrorFmt("Failed to apply step size for %s: %v", symbol.String(), err)
+		logger.ErrorFmt("Failed to apply step size for %s: %v", symbolStr, err)
 		return
+	}
+
+	// In live mode, place the order first and only create position if successful
+	if !mb.cfg.GeneralConfig.SimulationMode {
+		// Use regular spot orders for LONG positions (buy with own funds)
+		// Use margin orders only for SHORT positions (borrow to sell)
+		switch side {
+		case "LONG":
+			if err := mb.placeSpotOrder(symbol, "BUY", validatedQty); err != nil {
+				logger.ErrorFmt("Live spot order failed for %s: %v", symbolStr, err)
+				return
+			}
+		case "SHORT":
+			orderSucceeded := false
+			if err := mb.placeMarginOrder(symbol, "SHORT", validatedQty); err != nil {
+				errStr := err.Error()
+
+				// Check if this is an unmarshaling error (order likely succeeded)
+				if strings.Contains(errStr, "UNMARSHAL_ERROR") {
+					logger.WarningFmt("Margin order response parsing failed for %s (order likely succeeded on Binance): %v", symbolStr, err)
+					logger.WarningFmt("This is a known issue where Binance returns numeric fields as strings.")
+					logger.InfoFmt("Creating position anyway to track the order that was placed on Binance.")
+					orderSucceeded = true
+				} else if strings.Contains(errStr, "-3006") || strings.Contains(errStr, "borrow amount has exceed maximum borrow amount") || strings.Contains(errStr, "maximum borrow amount") {
+					// Check if this is a borrowing limit error (temporary, not permanent)
+					logger.WarningFmt("Cannot open SHORT position for %s: Maximum borrowing limit reached.", symbolStr)
+					logger.WarningFmt("This is a temporary condition. Possible solutions:")
+					logger.WarningFmt("  1. Wait for existing positions to close (freeing up borrowing capacity)")
+					logger.WarningFmt("  2. Reduce USDTPositionSize in config to use smaller position sizes")
+					logger.WarningFmt("  3. Add more collateral to your margin account")
+					logger.WarningFmt("  4. Close some existing SHORT positions manually")
+					logger.WarningFmt("The bot will retry on the next cycle when capacity becomes available.")
+					return
+				} else if isPermanent, reason := mb.isMarginErrorPermanent(err); isPermanent {
+					// Check if this is a permanent error (margin not allowed for this symbol)
+					// Note: This function is called from processCycle() which already holds mb.mu.Lock(),
+					// so we can update unsupportedSymbols directly without additional locking
+					mb.unsupportedSymbols[symbolStr] = reason
+
+					var errorMsg string
+					switch reason {
+					case "MARGIN_NOT_ALLOWED":
+						errorMsg = fmt.Sprintf("Margin trading is not enabled for %s on your Binance account. This symbol will be skipped for future SHORT positions.", symbolStr)
+					case "ISOLATED_ACCOUNT_MISSING":
+						errorMsg = fmt.Sprintf("Isolated margin account does not exist for %s. Enable isolated margin for this symbol on Binance, or switch to CROSS margin mode. This symbol will be skipped for future SHORT positions.", symbolStr)
+					case "MARGIN_ACCOUNT_MISSING":
+						errorMsg = fmt.Sprintf("Margin account does not exist for %s. Enable margin trading on your Binance account. This symbol will be skipped for future SHORT positions.", symbolStr)
+					default:
+						errorMsg = fmt.Sprintf("Margin trading unavailable for %s: %s. This symbol will be skipped.", symbolStr, reason)
+					}
+					logger.WarningFmt("%s", errorMsg)
+					return
+				} else {
+					logger.ErrorFmt("Live margin order failed for %s: %v", symbolStr, err)
+					return
+				}
+			} else {
+				orderSucceeded = true
+			}
+
+			// Create position if order succeeded (including unmarshal errors where order likely succeeded)
+			if !orderSucceeded {
+				return
+			}
+		}
+		// Only proceed to create position if API call succeeded
+	} else {
+		logger.InfoFmt("%s %s", logger.Yellow("[SIMULATION MODE]"), logger.Italic(fmt.Sprintf("Would open %s %s qty %s at %s", side, symbolStr, validatedQty.String(), entryPrice.String())))
+	}
+
+	// Create position object only after successful order placement (or in simulation mode)
+	borrowedQty := udecimal.Zero
+	if side == "SHORT" {
+		// For SHORT positions, we borrowed the base asset quantity
+		borrowedQty = validatedQty
 	}
 
 	position := &MarginPosition{
@@ -534,36 +647,17 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 		PeakPrice:   entryPrice,
 		TroughPrice: entryPrice,
 		Notional:    entryPrice.Mul(validatedQty),
-		BorrowedQty: udecimal.Zero,
+		BorrowedQty: borrowedQty,
 	}
 
-	if !mb.cfg.GeneralConfig.SimulationMode {
-		// Use regular spot orders for LONG positions (buy with own funds)
-		// Use margin orders only for SHORT positions (borrow to sell)
-		switch side {
-		case "LONG":
-			if err := mb.placeSpotOrder(symbol, "BUY", validatedQty); err != nil {
-				logger.ErrorFmt("Live spot order failed for %s: %v", symbol.String(), err)
-				return
-			}
-		case "SHORT":
-			if err := mb.placeMarginOrder(symbol, "SHORT", validatedQty); err != nil {
-				logger.ErrorFmt("Live margin order failed for %s: %v", symbol.String(), err)
-				return
-			}
-		}
-	} else {
-		logger.InfoFmt("%s %s", logger.Yellow("[SIMULATION MODE]"), logger.Italic(fmt.Sprintf("Would open %s %s qty %s at %s", side, symbol.String(), validatedQty.String(), entryPrice.String())))
-	}
-
-	mb.positions[symbol.String()] = position
+	mb.positions[symbolStr] = position
 
 	// Log simulation trade
 	if mb.cfg.GeneralConfig.SimulationMode && mb.simLogger != nil {
 		mb.logSimulationTrade("OPEN", symbol.String(), position, entryPrice, udecimal.Zero, udecimal.Zero, "ENTRY", time.Duration(0))
 	}
 
-	logger.InfoFmt("Opened margin %s for %s: entry=%s qty=%s", side, symbol.String(), entryPrice.String(), validatedQty.String())
+	logger.InfoFmt("%s for %s: entry=%s qty=%s", logger.BrightBlue("Opened margin ")+logger.ColorizeSide(side), symbol.String(), entryPrice.String(), validatedQty.String())
 	mb.tradeLogger.Info().
 		Str("action", "OPEN_MARGIN_POSITION").
 		Str("symbol", symbol.String()).
@@ -573,6 +667,35 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 		Str("margin_type", mb.cfg.MarginConfig.MarginType).
 		Time("entry_time", position.EntryTime).
 		Msg("Margin position opened")
+}
+
+// getAccountBalance retrieves the free balance for a specific asset
+func (mb *MarginBot) getAccountBalance(asset string) (udecimal.Decimal, error) {
+	if mb.client == nil {
+		return udecimal.Zero, fmt.Errorf("client not configured")
+	}
+
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	accountService := mb.client.NewGetAccountService()
+	res, err := accountService.Do(ctx)
+	if err != nil {
+		return udecimal.Zero, fmt.Errorf("failed to get account: %w", err)
+	}
+
+	for _, balance := range res.Balances {
+		if balance.Asset == asset {
+			balanceDecimal, err := udecimal.Parse(balance.Free)
+			if err != nil {
+				return udecimal.Zero, fmt.Errorf("failed to parse balance for %s: %w", asset, err)
+			}
+			return balanceDecimal, nil
+		}
+	}
+
+	return udecimal.Zero, nil // Asset not found, return zero balance
 }
 
 func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal, reason string) {
@@ -596,36 +719,78 @@ func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal,
 		exitSide = "BUY"
 	}
 
+	// Determine the actual quantity to use for closing
+	closeQuantity := position.Quantity
+
 	if !mb.cfg.GeneralConfig.SimulationMode {
+		// For LONG positions, fetch actual balance and use minimum of stored quantity and available balance
+		// This prevents trying to sell more than we actually own due to fees/rounding
+		if position.Side == "LONG" {
+			actualBalance, err := mb.getAccountBalance(position.Symbol.Base.Symbol)
+			if err != nil {
+				logger.WarningFmt("Failed to get account balance for %s when closing %s: %v. Using stored quantity.", position.Symbol.Base.Symbol, symbolStr, err)
+			} else {
+				// Use the minimum of stored quantity and actual balance
+				// This ensures we don't try to sell more than we have
+				if actualBalance.Cmp(closeQuantity) < 0 {
+					logger.InfoFmt("Actual balance (%s) is less than stored quantity (%s) for %s. Using actual balance.", actualBalance.String(), closeQuantity.String(), symbolStr)
+					closeQuantity = actualBalance
+				}
+
+				// Apply step size rounding to ensure valid quantity
+				// StepSizeQuantity always rounds down, so result will be <= input
+				// Since we've already ensured closeQuantity <= actualBalance, the rounded result will also be <= actualBalance
+				symbolData, ok := mb.ob.Symbols.Get(symbolStr)
+				if ok {
+					roundedQty, err := arbitrage.StepSizeQuantity(symbolData, closeQuantity)
+					if err != nil {
+						logger.WarningFmt("Failed to apply step size rounding for %s: %v. Using unrounded quantity.", symbolStr, err)
+					} else {
+						// StepSizeQuantity rounds down, so roundedQty <= closeQuantity <= actualBalance
+						// No need to check if roundedQty > actualBalance as it's impossible
+						closeQuantity = roundedQty
+					}
+				}
+
+				// Final safety check: ensure we're not trying to sell zero or negative
+				if closeQuantity.Cmp(udecimal.Zero) <= 0 {
+					logger.ErrorFmt("Cannot close %s: calculated quantity (%s) is zero or negative", symbolStr, closeQuantity.String())
+					return
+				}
+			}
+		}
+
 		// Use regular spot orders for closing LONG positions
 		// Use margin orders with AUTO_REPAY for closing SHORT positions
 		switch position.Side {
 		case "LONG":
-			if err := mb.placeSpotOrder(position.Symbol, exitSide, position.Quantity); err != nil {
+			if err := mb.placeSpotOrder(position.Symbol, exitSide, closeQuantity); err != nil {
 				logger.ErrorFmt("Failed to close LONG position %s: %v", symbolStr, err)
 				return
 			}
 		case "SHORT":
 			// Use margin order with AUTO_REPAY to buy back and automatically repay borrowed assets
-			if err := mb.placeMarginOrderWithRepay(position.Symbol, exitSide, position.Quantity, true); err != nil {
+			if err := mb.placeMarginOrderWithRepay(position.Symbol, exitSide, closeQuantity, true); err != nil {
 				logger.ErrorFmt("Failed to close SHORT position %s: %v", symbolStr, err)
 				return
 			}
 		}
 	} else {
-		logger.InfoFmt("%s %s", logger.Yellow("[SIMULATION MODE]"), logger.Italic(fmt.Sprintf("Would close %s via %s %s at %s", symbolStr, exitSide, position.Quantity.String(), exitPrice.String())))
+		logger.InfoFmt("%s %s", logger.Yellow("[SIMULATION MODE]"), logger.Italic(fmt.Sprintf("Would close %s via %s %s at %s", symbolStr, exitSide, closeQuantity.String(), exitPrice.String())))
 	}
 
 	position.Status = "CLOSED"
 	delete(mb.positions, symbolStr)
 
 	// Update simulation statistics
-	if mb.cfg.GeneralConfig.SimulationMode && mb.simLogger != nil {
-		mb.updateSimStats(profitAmount, effectivePnL, position.Notional, holdDuration)
-		mb.logSimulationTrade("CLOSE", symbolStr, position, exitPrice, effectivePnL, profitAmount, reason, holdDuration)
+	if mb.simLogger != nil {
+		mb.updateSimStats(profitAmount, position.Notional)
+		if mb.cfg.GeneralConfig.SimulationMode {
+			mb.logSimulationTrade("CLOSE", symbolStr, position, exitPrice, effectivePnL, profitAmount, reason, holdDuration)
+		}
 	}
 
-	logger.InfoFmt("Closed margin %s: P&L=%s%% amount=%s reason=%s", symbolStr, effectivePnL.Mul(udecimal.MustFromFloat64(100)).StringFixed(3), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
+	logger.InfoFmt("Closed margin %s: P&L=%s%% amount=%s reason=%s", symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
 	mb.tradeLogger.Info().
 		Str("action", "CLOSE_MARGIN_POSITION").
 		Str("symbol", symbolStr).
@@ -681,8 +846,26 @@ func (mb *MarginBot) placeMarginOrderWithRepay(pair currency.Pair, side string, 
 		orderService = orderService.IsIsolated("FALSE")
 	}
 
-	order, err := orderService.Do(context.Background())
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	order, err := orderService.Do(ctx)
 	if err != nil {
+		// Check if this is a JSON unmarshaling error for marginBuyBorrowAmount
+		// Binance sometimes returns numeric fields as strings, causing unmarshaling to fail
+		// The order might have actually succeeded on Binance's side
+		errStr := err.Error()
+		if strings.Contains(errStr, "marginBuyBorrowAmount") && strings.Contains(errStr, "cannot unmarshal string") {
+			// This is a known issue with Binance API responses
+			// The order may have succeeded, but we can't verify without the response
+			// For closing positions, we'll log a warning but treat it as potentially successful
+			logger.WarningFmt("Margin order response parsing failed for %s %s (order may have succeeded): %v", pair.String(), side, err)
+			logger.WarningFmt("This is a known issue where Binance returns numeric fields as strings.")
+			// Return nil to allow the position closure to proceed
+			// The order likely succeeded on Binance's side
+			return nil
+		}
 		return fmt.Errorf("failed to place margin order: %w", err)
 	}
 
@@ -716,8 +899,12 @@ func (mb *MarginBot) placeSpotOrder(pair currency.Pair, side string, qty udecima
 	}
 
 	// Place regular spot order (no margin, no borrowing)
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	order, err := mb.client.NewCreateOrderService().Symbol(pair.String()).
-		Quantity(formattedQtyFloat).Type("MARKET").Side(side).Do(context.Background())
+		Quantity(formattedQtyFloat).Type("MARKET").Side(side).Do(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to place spot order: %w", err)
 	}
@@ -725,7 +912,7 @@ func (mb *MarginBot) placeSpotOrder(pair currency.Pair, side string, qty udecima
 	if mb.cfg.GeneralConfig.VerboseLogging {
 		logger.InfoFmt("Spot order response: %+v", order)
 	}
-	logger.InfoFmt("Spot order placed for %s %s %s at market", pair.String(), side, formattedQty)
+	logger.InfoFmt("%s for %s %s %s at market", logger.BrightBlue("Spot order placed"), pair.String(), logger.ColorizeSide(side), formattedQty)
 	return nil
 }
 
@@ -780,8 +967,22 @@ func (mb *MarginBot) placeMarginOrder(pair currency.Pair, side string, qty udeci
 		orderService = orderService.IsIsolated("FALSE")
 	}
 
-	order, err := orderService.Do(context.Background())
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	order, err := orderService.Do(ctx)
 	if err != nil {
+		// Check if this is a JSON unmarshaling error for marginBuyBorrowAmount
+		// Binance sometimes returns numeric fields as strings, causing unmarshaling to fail
+		// The order might have actually succeeded on Binance's side
+		errStr := err.Error()
+		if strings.Contains(errStr, "marginBuyBorrowAmount") && strings.Contains(errStr, "cannot unmarshal string") {
+			// This is a known issue with Binance API responses
+			// The order may have succeeded, but we can't verify without the response
+			// Return a special error type so the caller can handle it appropriately
+			return fmt.Errorf("UNMARSHAL_ERROR: margin order response parsing failed (order may have succeeded): %w", err)
+		}
 		return fmt.Errorf("failed to place margin order: %w", err)
 	}
 
@@ -883,7 +1084,7 @@ func (mb *MarginBot) logSimulationTrade(action, symbolStr string, position *Marg
 	entry.Msg("MARGIN_SIMULATION_TRADE")
 }
 
-func (mb *MarginBot) updateSimStats(pnlAmount, pnlPercent, volume udecimal.Decimal, holdDuration time.Duration) {
+func (mb *MarginBot) updateSimStats(pnlAmount, volume udecimal.Decimal) {
 	mb.simStats.mu.Lock()
 	defer mb.simStats.mu.Unlock()
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -32,6 +33,7 @@ var GridBot *grid.GridTradingBot
 var TradingBot *trading.TradingBot
 var FuturesBot *trading.FuturesBot
 var MarginBot *trading.MarginBot
+var positionsLoaded = false
 
 func main() {
 	cmd := exec.Command("scripts/populator")
@@ -133,6 +135,12 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 
 	TradingBot = trading.NewTradingBot(ob, &SimTradeLogger)
 
+	// Load saved positions after bot initialization
+	gridPositionsMap := make(map[string]interface{})
+	if err := trading.LoadPositions(TradingBot, MarginBot, FuturesBot, gridPositionsMap); err != nil {
+		logger.WarningFmt("Failed to load saved positions: %v", err)
+	}
+
 	symbols := make([]string, 0, len(cfg.NormalConfig.QuoteAssets))
 	for _, asset := range cfg.NormalConfig.QuoteAssets {
 		symbols = append(symbols, asset+cfg.NormalConfig.BaseAsset)
@@ -176,6 +184,22 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 
 	TradingBot.StartTrading()
 
+	// Start periodic position saving
+	positionSaveTicker := time.NewTicker(30 * time.Second)
+	positionSaveStop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-positionSaveTicker.C:
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+					logger.WarningFmt("Failed to save positions periodically: %v", err)
+				}
+			case <-positionSaveStop:
+				return
+			}
+		}
+	}()
+
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
 
@@ -183,9 +207,21 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 	case err := <-errCh:
 		logger.Error(err)
 		close(stopCh) // Signal all goroutines to stop
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing connections...")
 		close(stopCh) // Signal all goroutines to stop
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	}
 
 	wg.Wait()
@@ -199,6 +235,12 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 	}
 
 	FuturesBot = trading.NewFuturesBot(ob, cfg, futuresClient, &SimTradeLogger)
+
+	// Load saved positions after bot initialization
+	gridPositionsMap := make(map[string]interface{})
+	if err := trading.LoadPositions(TradingBot, MarginBot, FuturesBot, gridPositionsMap); err != nil {
+		logger.WarningFmt("Failed to load saved positions: %v", err)
+	}
 
 	symbols := make([]string, 0, len(cfg.FuturesConfig.QuoteAssets))
 	for _, asset := range cfg.FuturesConfig.QuoteAssets {
@@ -260,6 +302,22 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Futures trading bot is running...")))
 	FuturesBot.Start(ctx)
 
+	// Start periodic position saving
+	positionSaveTicker := time.NewTicker(30 * time.Second)
+	positionSaveStop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-positionSaveTicker.C:
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+					logger.WarningFmt("Failed to save positions periodically: %v", err)
+				}
+			case <-positionSaveStop:
+				return
+			}
+		}
+	}()
+
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
 
@@ -268,10 +326,22 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		logger.Error(err)
 		close(stopCh)
 		cancel()
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing futures streams...")
 		close(stopCh)
 		cancel()
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	}
 
 	wg.Wait()
@@ -283,6 +353,7 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 }
 
 // startMarginTrading initializes and starts the directional margin bot.
+
 func startMarginTrading(ob *arbitrage.Orderbook) {
 	if client == nil {
 		logger.ErrorFmt("Spot client not initialized. Ensure credentials are set.")
@@ -290,6 +361,15 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 	}
 
 	MarginBot = trading.NewMarginBot(ob, cfg, client, &SimTradeLogger)
+
+	// Load saved positions after bot initialization
+	gridPositionsMap := make(map[string]interface{})
+	if err := trading.LoadPositions(TradingBot, MarginBot, FuturesBot, gridPositionsMap); err != nil {
+		logger.WarningFmt("Failed to load saved positions: %v", err)
+		positionsLoaded = false
+	} else {
+		positionsLoaded = true
+	}
 
 	symbols := make([]string, 0, len(cfg.MarginConfig.QuoteAssets))
 	for _, asset := range cfg.MarginConfig.QuoteAssets {
@@ -310,13 +390,14 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 	var wg sync.WaitGroup
 	stopCh := make(chan struct{})
 	errCh := make(chan error)
+	symbolsStr := strings.Join(symbols, ", ")
+	logger.InfoFmt("Starting margin websocket streams for %s.", symbolsStr)
 
 	for i := 0; i < len(symbols); i++ {
 		symbol := symbols[i]
 		wg.Add(1)
 		go func(symbol string) {
 			defer wg.Done()
-			logger.InfoFmt("Starting margin websocket stream for %s.", symbol)
 			doneCh, stop, err := websocketStreamClient.WsBookTickerServe(
 				symbol,
 				handler.HandleBookTickerEvent,
@@ -343,25 +424,108 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Margin trading bot is running...")))
 	MarginBot.Start(ctx)
 
+	// Start periodic position saving
+	positionSaveTicker := time.NewTicker(30 * time.Second)
+	positionSaveStop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-positionSaveTicker.C:
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+					logger.WarningFmt("Failed to save positions periodically: %v", err)
+				}
+			case <-positionSaveStop:
+				return
+			}
+		}
+	}()
+
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
-	case err := <-errCh:
-		logger.Error(err)
-		close(stopCh)
-		cancel()
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing margin streams...")
 		close(stopCh)
 		cancel()
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
+	case err := <-errCh:
+		logger.Error(err)
+		close(stopCh)
+		cancel()
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	}
 
 	wg.Wait()
 
 	// Log final simulation summary if in simulation mode
-	if cfg.GeneralConfig.SimulationMode && MarginBot != nil {
+	if MarginBot != nil {
 		MarginBot.LogFinalSimulationSummary()
+	}
+}
+
+// getGridPositionsForSave extracts grid positions for saving (avoids import cycle)
+func getGridPositionsForSave() map[string]any {
+	if GridBot == nil {
+		return nil
+	}
+	GridBot.Mu().Lock()
+	defer GridBot.Mu().Unlock()
+
+	result := make(map[string]any)
+	for symbol, pos := range GridBot.Positions {
+		if pos.Status == "OPEN" {
+			result[symbol] = &trading.GridPositionData{
+				Symbol:       pos.Symbol,
+				BaseAsset:    pos.BaseAsset,
+				QuoteAsset:   pos.QuoteAsset,
+				EntryPrice:   pos.EntryPrice,
+				Quantity:     pos.Quantity,
+				EntryTime:    pos.EntryTime,
+				TargetProfit: pos.TargetProfit,
+				StopLoss:     pos.StopLoss,
+				Status:       pos.Status,
+				MaxHoldTime:  pos.MaxHoldTime,
+			}
+		}
+	}
+	return result
+}
+
+// restoreGridPositions restores grid positions from loaded data
+func restoreGridPositions(gridPositionsMap map[string]any) {
+	if GridBot == nil || len(gridPositionsMap) == 0 {
+		return
+	}
+
+	GridBot.Mu().Lock()
+	defer GridBot.Mu().Unlock()
+
+	for symbol, posInterface := range gridPositionsMap {
+		if posData, ok := posInterface.(*trading.GridPositionData); ok && posData.Status == "OPEN" {
+			GridBot.Positions[symbol] = &grid.Position{
+				Symbol:       posData.Symbol,
+				BaseAsset:    posData.BaseAsset,
+				QuoteAsset:   posData.QuoteAsset,
+				EntryPrice:   posData.EntryPrice,
+				Quantity:     posData.Quantity,
+				EntryTime:    posData.EntryTime,
+				TargetProfit: posData.TargetProfit,
+				StopLoss:     posData.StopLoss,
+				Status:       posData.Status,
+				MaxHoldTime:  posData.MaxHoldTime,
+			}
+		}
 	}
 }
 
@@ -369,6 +533,15 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 func startGridTrading(ob *arbitrage.Orderbook) {
 	// Create grid trading bot
 	GridBot = grid.NewGridTradingBot(cfg, client, ob, &SimTradeLogger)
+
+	// Load saved positions after bot initialization
+	gridPositionsMap := make(map[string]interface{})
+	if err := trading.LoadPositions(TradingBot, MarginBot, FuturesBot, gridPositionsMap); err != nil {
+		logger.WarningFmt("Failed to load saved positions: %v", err)
+	}
+
+	// Restore saved grid positions
+	restoreGridPositions(gridPositionsMap)
 
 	_, err := CheckAccountBalance()
 	if err != nil {
@@ -428,6 +601,22 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 	time.Sleep(time.Millisecond * 15)
 	logger.InfoFmt("%s", logger.Reset()+logger.BrightYellow(logger.Italic("Grid trading bot is running...")))
 
+	// Start periodic position saving
+	positionSaveTicker := time.NewTicker(30 * time.Second)
+	positionSaveStop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-positionSaveTicker.C:
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+					logger.WarningFmt("Failed to save positions periodically: %v", err)
+				}
+			case <-positionSaveStop:
+				return
+			}
+		}
+	}()
+
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
 
@@ -436,9 +625,21 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 	case err := <-errCh:
 		logger.Error(err)
 		close(stopCh) // Signal all goroutines to stop
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing connections...")
 		close(stopCh) // Signal all goroutines to stop
+		positionSaveTicker.Stop()
+		close(positionSaveStop)
+		// Save positions before shutdown
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+			logger.ErrorFmt("Failed to save positions: %v", err)
+		}
 	}
 
 	wg.Wait()

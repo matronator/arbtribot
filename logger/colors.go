@@ -2,6 +2,8 @@ package logger
 
 import (
 	"strconv"
+
+	"github.com/quagmt/udecimal"
 )
 
 func ColorizeReason(reason string) string {
@@ -10,6 +12,7 @@ func ColorizeReason(reason string) string {
 		return Red(reason)
 	case "TAKE_PROFIT":
 	case "PROFIT_TARGET":
+	case "TRAILING_EXIT":
 		return Green(reason)
 	case "MAX_HOLD_TIME":
 		return Yellow(reason)
@@ -50,6 +53,27 @@ func ColorizeNumber(i float64, min *float64, max *float64) string {
 	default:
 		return Dim(strconv.FormatFloat(i, 'f', 0, 64))
 	}
+}
+
+func ColorizePnl(pnl udecimal.Decimal) string {
+	if pnl.Cmp(udecimal.Zero) > 0 {
+		return Green(pnl.String())
+	} else if pnl.Cmp(udecimal.Zero) < 0 {
+		return Red(pnl.String())
+	}
+	return Yellow(pnl.String())
+}
+
+func ColorizeSide(side string) string {
+	switch side {
+	case "LONG":
+	case "BUY":
+		return Green(side)
+	case "SHORT":
+	case "SELL":
+		return Red(side)
+	}
+	return Yellow(side)
 }
 
 func Reset() string {

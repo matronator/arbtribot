@@ -24,6 +24,7 @@ type GeneralConfig struct {
 	APISecret      string  // Binance API Secret (for live trading)
 	FeeRate        float64 // Binance spot trading fee rate (default 0.001 = 0.1%)
 	DebugMode      bool    // Enable debug logging
+	LogToConsole   bool    // Enable logging to console (true = console, false = file)
 	VerboseLogging bool    // Enable very verbose logging (debug level)
 	TraceLogging   bool    // Enable trace logging (trace level)
 	WdEnabled      bool
@@ -99,6 +100,7 @@ func LoadConfig() *Config {
 				APISecret:      "",
 				FeeRate:        0.001, // 0.1% fee = 0.001
 				DebugMode:      false, // Default to false, can be set via env
+				LogToConsole:   true,  // Default to false, can be set via env
 				TraceLogging:   false, // Default to false, can be set via env
 				VerboseLogging: false,
 				WdEnabled:      false,
@@ -390,6 +392,7 @@ func LoadConfig() *Config {
 			APISecret:      os.Getenv("BINANCE_SECRET_KEY"),
 			FeeRate:        fee,
 			DebugMode:      os.Getenv("DEBUG_MODE") == "true",
+			LogToConsole:   os.Getenv("LOG_TO_CONSOLE") == "true",
 			TraceLogging:   os.Getenv("TRACE_LOGGING") == "true",
 			VerboseLogging: os.Getenv("VERBOSE_LOGGING") == "true",
 			WdEnabled:      os.Getenv("WD_ENABLED") == "true",

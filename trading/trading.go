@@ -95,6 +95,11 @@ func NewTradingBot(ob *arbitrage.Orderbook, tradeLogger *zerolog.Logger) *Tradin
 	}
 }
 
+// Mu returns the mutex (for thread-safe access)
+func (tb *TradingBot) Mu() *sync.RWMutex {
+	return &tb.mu
+}
+
 func (tb *TradingBot) StartTrading() {
 	go tb.tradingLoop()
 }
@@ -127,12 +132,6 @@ func (tb *TradingBot) checkExistingPositions() {
 
 		if tb.cfg.GeneralConfig.VerboseLogging {
 			logger.InfoFmt("Checking position %s", symbolStr)
-		}
-
-		// Check if position has exceeded max hold time
-		if time.Since(position.EntryTime) > position.MaxHoldTime {
-			tb.closePosition(symbolStr, "TIMEOUT")
-			continue
 		}
 
 		// Get current price for the symbol
@@ -210,6 +209,19 @@ func (tb *TradingBot) checkExistingPositions() {
 			logger.InfoFmt("Stop loss triggered for %s: %.4f%% <= -%.4f%%",
 				symbolStr, profitPercentage*100, tb.cfg.NormalConfig.StopLoss*100)
 			tb.closePosition(symbolStr, "STOP_LOSS")
+		}
+
+		// Check if position has exceeded max hold time
+		// Only close on timeout if position is profitable (P&L > 0)
+		// If losing money, keep it open unless stop loss is reached
+		if time.Since(position.EntryTime) > position.MaxHoldTime {
+			if profitAmount > 0 {
+				logger.InfoFmt("Max hold time reached for %s with positive P&L (%.2f USDC). Closing position.", symbolStr, profitAmount)
+				tb.closePosition(symbolStr, "TIMEOUT")
+			} else {
+				logger.InfoFmt("Max hold time reached for %s but position is unprofitable (P&L=%.2f USDC). Keeping position open until stop loss.", symbolStr, profitAmount)
+			}
+			continue
 		}
 	}
 }

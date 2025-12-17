@@ -126,6 +126,16 @@ func NewFuturesBot(ob *arbitrage.Orderbook, cfg *utils.Config, futuresClient *fu
 	}
 }
 
+// Positions returns the positions map (for persistence)
+func (fb *FuturesBot) Positions() map[string]*FuturesPosition {
+	return fb.positions
+}
+
+// Mu returns the mutex (for thread-safe access)
+func (fb *FuturesBot) Mu() *sync.RWMutex {
+	return &fb.mu
+}
+
 func (fb *FuturesBot) Start(ctx context.Context) {
 	go fb.loop(ctx)
 }
@@ -337,10 +347,16 @@ func (fb *FuturesBot) evaluateExistingPositions() {
 		}
 
 		// Time-based exit
+		// Only close on timeout if position is profitable (P&L > 0)
+		// If losing money, keep it open unless stop loss is reached
 		maxHoldTime := time.Duration(fb.cfg.NormalConfig.MaxHoldTime) * time.Minute
 		if holdDuration > maxHoldTime {
-			logger.InfoFmt("Max hold time reached for %s: %v > %v", symbolStr, holdDuration, maxHoldTime)
-			fb.closePosition(symbolStr, currentPrice, "TIMEOUT")
+			if effectivePnL.Cmp(udecimal.Zero) > 0 {
+				logger.InfoFmt("Max hold time reached for %s with positive P&L (%.4f%%). Closing position.", symbolStr, pnlPercent.InexactFloat64())
+				fb.closePosition(symbolStr, currentPrice, "TIMEOUT")
+			} else {
+				logger.InfoFmt("Max hold time reached for %s but position is unprofitable (P&L=%.4f%%). Keeping position open until stop loss.", symbolStr, pnlPercent.InexactFloat64())
+			}
 			continue
 		}
 

@@ -95,6 +95,11 @@ func NewGridTradingBot(config *utils.Config, client *binance.Client, orderBook *
 	}
 }
 
+// Mu returns the mutex (for thread-safe access)
+func (gtb *GridTradingBot) Mu() *sync.RWMutex {
+	return &gtb.mu
+}
+
 // GetDefaultGridConfig returns default configuration for grid trading
 func GetDefaultGridConfig() *GridConfig {
 	return &GridConfig{
@@ -268,8 +273,15 @@ func (gtb *GridTradingBot) checkExistingPositions() {
 		}
 
 		// Check for max hold time
+		// Only close on timeout if position is profitable (P&L > 0)
+		// If losing money, keep it open unless stop loss is reached
 		if time.Since(position.EntryTime) > position.MaxHoldTime {
-			gtb.closePosition(symbol, "TIMEOUT", currentPrice, profitLoss)
+			if profitLoss > 0 {
+				logger.InfoFmt("Max hold time reached for %s with positive P&L (%.2f%%). Closing position.", symbol, profitLoss*100)
+				gtb.closePosition(symbol, "TIMEOUT", currentPrice, profitLoss)
+			} else {
+				logger.InfoFmt("Max hold time reached for %s but position is unprofitable (P&L=%.2f%%). Keeping position open until stop loss.", symbol, profitLoss*100)
+			}
 			continue
 		}
 
