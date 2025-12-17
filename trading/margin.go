@@ -322,7 +322,7 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		// Stop loss
 		stopLossThreshold := udecimal.MustFromFloat64(-mb.cfg.MarginConfig.StopLoss)
 		if effectivePnL.Cmp(stopLossThreshold) <= 0 {
-			logger.InfoFmt("Stop loss triggered for %s: P&L=%s <= %.4f%%", symbolStr, logger.ColorizePnl(effectivePnL), stopLossThreshold.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+			logger.InfoFmt("%s for %s: P&L=%s%% <= %.4f%%", logger.BrightRed("Stop loss triggered"), symbolStr, logger.ColorizePnl(effectivePnL), stopLossThreshold.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 			mb.closePosition(symbolStr, currentPrice, "STOP_LOSS")
 			continue
 		}
@@ -333,7 +333,7 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		maxHoldTime := time.Duration(mb.cfg.NormalConfig.MaxHoldTime) * time.Minute
 		if holdDuration > maxHoldTime {
 			if effectivePnL.Cmp(udecimal.Zero) > 0 {
-				logger.InfoFmt("Max hold time reached for %s with positive P&L (%s). Closing position.", symbolStr, logger.ColorizePnl(effectivePnL))
+				logger.InfoFmt("%s for %s: P&L=%s%%. Closing position.", logger.Blue("Max hold time reached"), symbolStr, logger.ColorizePnl(effectivePnL))
 				mb.closePosition(symbolStr, currentPrice, "TIMEOUT")
 			} else {
 				if mb.cfg.GeneralConfig.VerboseLogging {
@@ -347,7 +347,7 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		profitTarget := udecimal.MustFromFloat64(mb.cfg.MarginConfig.TrailingStart)
 		if effectivePnL.Cmp(profitTarget) >= 0 {
 			if mb.shouldTriggerTrail(position, currentPrice) {
-				logger.InfoFmt("Trailing exit triggered for %s: P&L=%s >= %.4f%%", symbolStr, logger.ColorizePnl(effectivePnL), profitTarget.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+				logger.InfoFmt("%s for %s: P&L=%s%% >= %.4f%%", logger.BrightGreen("Trailing exit triggered"), symbolStr, logger.ColorizePnl(effectivePnL), profitTarget.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 				mb.closePosition(symbolStr, currentPrice, "TRAILING_EXIT")
 				continue
 			} else if mb.cfg.GeneralConfig.VerboseLogging {
@@ -790,7 +790,7 @@ func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal,
 		}
 	}
 
-	logger.InfoFmt("Closed margin %s: P&L=%s%% amount=%s reason=%s", symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
+	logger.InfoFmt("%s for %s: P&L=%s amount=%s reason=%s", logger.BrightMagenta("Closed margin")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
 	mb.tradeLogger.Info().
 		Str("action", "CLOSE_MARGIN_POSITION").
 		Str("symbol", symbolStr).
@@ -912,7 +912,7 @@ func (mb *MarginBot) placeSpotOrder(pair currency.Pair, side string, qty udecima
 	if mb.cfg.GeneralConfig.VerboseLogging {
 		logger.InfoFmt("Spot order response: %+v", order)
 	}
-	logger.InfoFmt("%s for %s %s %s at market", logger.BrightBlue("Spot order placed"), pair.String(), logger.ColorizeSide(side), formattedQty)
+	logger.InfoFmt("Spot order placed for %s %s %s at market", pair.String(), logger.ColorizeSide(side), formattedQty)
 	return nil
 }
 

@@ -57,11 +57,11 @@ func ColorizeNumber(i float64, min *float64, max *float64) string {
 
 func ColorizePnl(pnl udecimal.Decimal) string {
 	if pnl.Cmp(udecimal.Zero) > 0 {
-		return Green(pnl.String())
+		return Green(pnl.StringFixed(4))
 	} else if pnl.Cmp(udecimal.Zero) < 0 {
-		return Red(pnl.String())
+		return Red(pnl.StringFixed(4))
 	}
-	return Yellow(pnl.String())
+	return Yellow(pnl.StringFixed(4))
 }
 
 func ColorizeSide(side string) string {
@@ -72,8 +72,10 @@ func ColorizeSide(side string) string {
 	case "SHORT":
 	case "SELL":
 		return Red(side)
+	default:
+		return Yellow(side)
 	}
-	return Yellow(side)
+	return side
 }
 
 func Reset() string {
