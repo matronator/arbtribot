@@ -332,7 +332,7 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		// If losing money, keep it open unless stop loss is reached
 		maxHoldTime := time.Duration(mb.cfg.NormalConfig.MaxHoldTime) * time.Minute
 		if holdDuration > maxHoldTime {
-			if effectivePnL.Cmp(udecimal.Zero) > 0 {
+			if effectivePnL.Cmp(udecimal.Zero) >= 0 {
 				logger.InfoFmt("%s for %s: P&L=%s%%. Closing position.", logger.Blue("Max hold time reached"), symbolStr, logger.ColorizePnl(effectivePnL))
 				mb.closePosition(symbolStr, currentPrice, "TIMEOUT")
 			} else {
@@ -657,7 +657,7 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 		mb.logSimulationTrade("OPEN", symbol.String(), position, entryPrice, udecimal.Zero, udecimal.Zero, "ENTRY", time.Duration(0))
 	}
 
-	logger.InfoFmt("%s for %s: entry=%s qty=%s", logger.BrightBlue("Opened margin ")+logger.ColorizeSide(side), symbol.String(), entryPrice.String(), validatedQty.String())
+	logger.InfoFmt("%s for %s: entry=%s qty=%s", logger.BrightGreen("Opened margin ")+logger.ColorizeSide(side), symbol.String(), entryPrice.String(), validatedQty.String())
 	mb.tradeLogger.Info().
 		Str("action", "OPEN_MARGIN_POSITION").
 		Str("symbol", symbol.String()).
@@ -790,7 +790,7 @@ func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal,
 		}
 	}
 
-	logger.InfoFmt("%s for %s: P&L=%s amount=%s reason=%s", logger.BrightMagenta("Closed margin")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
+	logger.InfoFmt("%s for %s: P&L=%s amount=%s reason=%s", logger.BrightMagenta("Closed margin ")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
 	mb.tradeLogger.Info().
 		Str("action", "CLOSE_MARGIN_POSITION").
 		Str("symbol", symbolStr).
