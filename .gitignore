@@ -14,3 +14,4 @@ bin/
 .qoder/rules/byterover-rules.md
 .augment/rules/byterover-rules.md
 positions.json
+/stats_*.csv

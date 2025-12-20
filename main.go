@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 
 	futures "github.com/adshao/go-binance/v2/futures"
 	binance "github.com/binance/binance-connector-go"
+	"github.com/quagmt/udecimal"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -332,6 +334,8 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
+		// Save statistics
+		saveRunStatistics("futures")
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing futures streams...")
 		close(stopCh)
@@ -342,6 +346,8 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
+		// Save statistics
+		saveRunStatistics("futures")
 	}
 
 	wg.Wait()
@@ -454,6 +460,8 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
+		// Save statistics
+		saveRunStatistics("margin")
 	case err := <-errCh:
 		logger.Error(err)
 		close(stopCh)
@@ -464,6 +472,8 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
+		// Save statistics
+		saveRunStatistics("margin")
 	}
 
 	wg.Wait()
@@ -472,6 +482,191 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 	if MarginBot != nil {
 		MarginBot.LogFinalSimulationSummary()
 	}
+}
+
+// saveRunStatistics collects and saves statistics for the current run
+func saveRunStatistics(tradingMode string) {
+	stats := collectRunStatistics(tradingMode)
+	if err := stats.SaveToCSV(); err != nil {
+		logger.ErrorFmt("Failed to save run statistics: %v", err)
+	} else {
+		logger.InfoFmt("Run statistics saved to: %s", fmt.Sprintf("stats_%s_%s.csv", tradingMode, stats.RunID))
+	}
+}
+
+// collectRunStatistics gathers statistics from the active trading bot
+func collectRunStatistics(tradingMode string) *utils.RunStatistics {
+	stats := &utils.RunStatistics{
+		RunID:       generateRunID(),
+		StartTime:   time.Now(),
+		EndTime:     time.Now(),
+		Config:      cfg,
+		TradingMode: tradingMode,
+		Orders:      make([]utils.OrderRecord, 0),
+	}
+
+	// Collect statistics based on trading mode
+	switch tradingMode {
+	case "margin":
+		if MarginBot != nil {
+			collectMarginStats(stats, MarginBot)
+		}
+	case "futures":
+		if FuturesBot != nil {
+			collectFuturesStats(stats, FuturesBot)
+		}
+	case "normal":
+		if TradingBot != nil {
+			collectNormalStats(stats, TradingBot)
+		}
+	}
+
+	return stats
+}
+
+func collectMarginStats(stats *utils.RunStatistics, bot *trading.MarginBot) {
+	simStats := bot.GetSimStats()
+	if simStats != nil {
+		stats.StartTime = simStats.StartTime
+		stats.TotalTrades = simStats.TotalTrades
+		stats.WinningTrades = simStats.WinningTrades
+		stats.LosingTrades = simStats.LosingTrades
+		stats.TotalPnL = simStats.TotalPnL.StringFixed(4)
+		stats.TotalPnLPercent = simStats.TotalPnLPercent.Mul(udecimal.MustFromFloat64(100)).StringFixed(4)
+	}
+
+	// Collect individual orders from closed positions
+	closedPositions := bot.ClosedPositions()
+	for symbol, positions := range closedPositions {
+		for _, cp := range positions {
+			stats.Orders = append(stats.Orders, utils.OrderRecord{
+				Symbol:       symbol,
+				Side:         cp.EntryPosition.Side,
+				EntryPrice:   cp.EntryPosition.EntryPrice.StringFixed(8),
+				ExitPrice:    cp.ClosingPrice,
+				Quantity:     cp.EntryPosition.Quantity.StringFixed(8),
+				EntryTime:    cp.EntryPosition.EntryTime,
+				ExitTime:     cp.ClosingTime,
+				PnL:          cp.Profit,
+				PnLPercent:   cp.PnLPercent,
+				Reason:       cp.Reason,
+				HoldDuration: cp.HoldDuration,
+				Notional:     cp.EntryPosition.Notional.StringFixed(2),
+				MarginType:   cfg.MarginConfig.MarginType,
+			})
+		}
+	}
+}
+
+func collectFuturesStats(stats *utils.RunStatistics, bot *trading.FuturesBot) {
+	simStats := bot.GetSimStats()
+	if simStats != nil {
+		stats.StartTime = simStats.StartTime
+		stats.TotalTrades = simStats.TotalTrades
+		stats.WinningTrades = simStats.WinningTrades
+		stats.LosingTrades = simStats.LosingTrades
+		stats.TotalPnL = simStats.TotalPnL.StringFixed(4)
+		stats.TotalPnLPercent = simStats.TotalPnLPercent.Mul(udecimal.MustFromFloat64(100)).StringFixed(4)
+	}
+
+	// Collect individual orders from closed positions
+	closedPositions := bot.ClosedPositions()
+	for symbol, positions := range closedPositions {
+		for _, cp := range positions {
+			stats.Orders = append(stats.Orders, utils.OrderRecord{
+				Symbol:       symbol,
+				Side:         cp.EntryPosition.Side,
+				EntryPrice:   cp.EntryPosition.EntryPrice.StringFixed(8),
+				ExitPrice:    cp.ClosingPrice,
+				Quantity:     cp.EntryPosition.Quantity.StringFixed(8),
+				EntryTime:    cp.EntryPosition.EntryTime,
+				ExitTime:     cp.ClosingTime,
+				PnL:          cp.Profit,
+				PnLPercent:   cp.PnLPercent,
+				Reason:       cp.Reason,
+				HoldDuration: cp.HoldDuration,
+				Notional:     cp.EntryPosition.Notional.StringFixed(2),
+				MarginType:   "", // Futures doesn't have margin type
+			})
+		}
+	}
+}
+
+func collectNormalStats(stats *utils.RunStatistics, bot *trading.TradingBot) {
+	bot.Mu().RLock()
+	defer bot.Mu().RUnlock()
+
+	totalPnL := 0.0
+	totalVolume := 0.0
+	totalTrades := 0
+	winningTrades := 0
+	losingTrades := 0
+
+	for symbol, closedPositions := range bot.ClosedPositions {
+		for _, cp := range closedPositions {
+			profit, err := strconv.ParseFloat(cp.Profit, 64)
+			if err != nil {
+				continue
+			}
+
+			entryPrice, err := strconv.ParseFloat(cp.EntryPosition.EntryPrice, 64)
+			if err != nil {
+				continue
+			}
+
+			quantity, err := strconv.ParseFloat(cp.EntryPosition.Quantity, 64)
+			if err != nil {
+				continue
+			}
+
+			volume := entryPrice * quantity
+			totalVolume += volume
+			totalPnL += profit
+			totalTrades++
+
+			if profit > 0 {
+				winningTrades++
+			} else if profit < 0 {
+				losingTrades++
+			}
+
+			pnlPercent := 0.0
+			if volume > 0 {
+				pnlPercent = (profit / volume) * 100
+			}
+
+			holdDuration := cp.ClosingTime.Sub(cp.EntryPosition.EntryTime)
+
+			stats.Orders = append(stats.Orders, utils.OrderRecord{
+				Symbol:       symbol,
+				Side:         "LONG",
+				EntryPrice:   cp.EntryPosition.EntryPrice,
+				ExitPrice:    cp.ClosingPrice,
+				Quantity:     cp.EntryPosition.Quantity,
+				EntryTime:    cp.EntryPosition.EntryTime,
+				ExitTime:     cp.ClosingTime,
+				PnL:          cp.Profit,
+				PnLPercent:   fmt.Sprintf("%.4f", pnlPercent),
+				Reason:       "CLOSED",
+				HoldDuration: holdDuration.Round(time.Second).String(),
+				Notional:     fmt.Sprintf("%.2f", volume),
+			})
+		}
+	}
+
+	stats.TotalTrades = totalTrades
+	stats.WinningTrades = winningTrades
+	stats.LosingTrades = losingTrades
+	stats.TotalPnL = fmt.Sprintf("%.4f", totalPnL)
+	if totalVolume > 0 {
+		stats.TotalPnLPercent = fmt.Sprintf("%.4f", (totalPnL/totalVolume)*100)
+	} else {
+		stats.TotalPnLPercent = "0.0000"
+	}
+}
+
+func generateRunID() string {
+	return time.Now().Format("20060102_150405")
 }
 
 // getGridPositionsForSave extracts grid positions for saving (avoids import cycle)
@@ -631,6 +826,8 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
+		// Save statistics
+		saveRunStatistics("grid")
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing connections...")
 		close(stopCh) // Signal all goroutines to stop
@@ -640,6 +837,8 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
+		// Save statistics
+		saveRunStatistics("grid")
 	}
 
 	wg.Wait()
@@ -714,9 +913,13 @@ func startTriangleArbitrage() {
 	case err := <-errCh:
 		logger.Error(err)
 		close(stopCh) // Signal all goroutines to stop
+		// Save statistics
+		saveRunStatistics("triangle")
 	case <-quitChannel:
 		logger.InfoFmt("Received interrupt signal. Closing connections...")
 		close(stopCh) // Signal all goroutines to stop
+		// Save statistics
+		saveRunStatistics("triangle")
 	}
 
 	wg.Wait()

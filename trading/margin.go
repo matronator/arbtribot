@@ -31,6 +31,16 @@ type MarginPosition struct {
 	BorrowedQty udecimal.Decimal // Amount borrowed for SHORT positions
 }
 
+type ClosedMarginPosition struct {
+	EntryPosition MarginPosition
+	ClosingPrice  string
+	ClosingTime   time.Time
+	Profit        string
+	PnLPercent    string
+	Reason        string
+	HoldDuration  string
+}
+
 type MarginBot struct {
 	ob                 *arbitrage.Orderbook
 	cfg                *utils.Config
@@ -39,9 +49,11 @@ type MarginBot struct {
 	client             *binance.Client
 	trackedSymbols     []currency.Pair
 	positions          map[string]*MarginPosition
+	closedPositions    map[string][]ClosedMarginPosition
 	history            map[string][]PricePoint
 	simStats           *SimulationStats
-	unsupportedSymbols map[string]string // Maps symbol to reason (e.g., "MARGIN_NOT_ALLOWED", "ISOLATED_ACCOUNT_MISSING", "MARGIN_ACCOUNT_MISSING")
+	unsupportedSymbols map[string]string    // Maps symbol to reason (e.g., "MARGIN_NOT_ALLOWED", "ISOLATED_ACCOUNT_MISSING", "MARGIN_ACCOUNT_MISSING")
+	cooldownUntil      map[string]time.Time // Maps symbol to cooldown expiration time for temporary errors (e.g., -3045)
 	mu                 sync.RWMutex
 }
 
@@ -114,9 +126,11 @@ func NewMarginBot(ob *arbitrage.Orderbook, cfg *utils.Config, client *binance.Cl
 		client:             client,
 		trackedSymbols:     tracked,
 		positions:          positions,
+		closedPositions:    make(map[string][]ClosedMarginPosition),
 		history:            history,
 		simStats:           simStats,
 		unsupportedSymbols: make(map[string]string),
+		cooldownUntil:      make(map[string]time.Time),
 	}
 }
 
@@ -531,6 +545,19 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 		return
 	}
 
+	// Check if this symbol is in cooldown (for temporary errors like -3045)
+	if cooldownExpiry, exists := mb.cooldownUntil[symbolStr]; exists {
+		if time.Now().Before(cooldownExpiry) {
+			remaining := time.Until(cooldownExpiry).Round(time.Second)
+			if mb.cfg.GeneralConfig.VerboseLogging {
+				logger.DebugFmt("Skipping %s %s: symbol in cooldown (remaining: %v)", side, symbolStr, remaining)
+			}
+			return
+		}
+		// Cooldown expired, remove it
+		delete(mb.cooldownUntil, symbolStr)
+	}
+
 	symbolData, ok := mb.ob.Symbols.Get(symbolStr)
 	if !ok {
 		logger.WarningFmt("Symbol %s not found for margin entry", symbolStr)
@@ -593,6 +620,15 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 					logger.WarningFmt("  4. Close some existing SHORT positions manually")
 					logger.WarningFmt("The bot will retry on the next cycle when capacity becomes available.")
 					return
+				} else if strings.Contains(errStr, "-3045") || strings.Contains(errStr, "does not have enough asset now") {
+					// Check if this is a temporary "insufficient asset" error
+					// Set a 5-minute cooldown before retrying
+					cooldownDuration := 5 * time.Minute
+					cooldownExpiry := time.Now().Add(cooldownDuration)
+					mb.cooldownUntil[symbolStr] = cooldownExpiry
+					logger.WarningFmt("Cannot open SHORT position for %s: Binance does not have enough asset available (error -3045).", symbolStr)
+					logger.WarningFmt("Setting cooldown for %v. Will retry after %v.", symbolStr, cooldownExpiry.Format("15:04:05"))
+					return
 				} else if isPermanent, reason := mb.isMarginErrorPermanent(err); isPermanent {
 					// Check if this is a permanent error (margin not allowed for this symbol)
 					// Note: This function is called from processCycle() which already holds mb.mu.Lock(),
@@ -652,7 +688,7 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 
 	mb.positions[symbolStr] = position
 
-	// Log simulation trade
+	// Log simulation trade if in simulation mode
 	if mb.cfg.GeneralConfig.SimulationMode && mb.simLogger != nil {
 		mb.logSimulationTrade("OPEN", symbol.String(), position, entryPrice, udecimal.Zero, udecimal.Zero, "ENTRY", time.Duration(0))
 	}
@@ -782,15 +818,32 @@ func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal,
 	position.Status = "CLOSED"
 	delete(mb.positions, symbolStr)
 
-	// Update simulation statistics
-	if mb.simLogger != nil {
-		mb.updateSimStats(profitAmount, position.Notional)
-		if mb.cfg.GeneralConfig.SimulationMode {
-			mb.logSimulationTrade("CLOSE", symbolStr, position, exitPrice, effectivePnL, profitAmount, reason, holdDuration)
-		}
+	// Create closed position record
+	closedPosition := ClosedMarginPosition{
+		EntryPosition: *position,
+		ClosingPrice:  exitPrice.StringFixed(8),
+		ClosingTime:   time.Now(),
+		Profit:        profitAmount.StringFixed(6),
+		PnLPercent:    effectivePnL.Mul(udecimal.MustFromFloat64(100)).StringFixed(4),
+		Reason:        reason,
+		HoldDuration:  holdDuration.Round(time.Second).String(),
 	}
 
-	logger.InfoFmt("%s for %s: P&L=%s amount=%s reason=%s", logger.BrightMagenta("Closed margin ")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
+	// Store closed position
+	if mb.closedPositions[symbolStr] == nil {
+		mb.closedPositions[symbolStr] = make([]ClosedMarginPosition, 0)
+	}
+	mb.closedPositions[symbolStr] = append(mb.closedPositions[symbolStr], closedPosition)
+
+	// Update statistics (always track stats, regardless of simulation mode)
+	mb.updateSimStats(profitAmount, position.Notional)
+
+	// Log simulation trade if in simulation mode
+	if mb.cfg.GeneralConfig.SimulationMode && mb.simLogger != nil {
+		mb.logSimulationTrade("CLOSE", symbolStr, position, exitPrice, effectivePnL, profitAmount, reason, holdDuration)
+	}
+
+	logger.InfoFmt("%s for %s: P&L=%s%% amount=%s reason=%s", logger.BrightMagenta("Closed margin ")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
 	mb.tradeLogger.Info().
 		Str("action", "CLOSE_MARGIN_POSITION").
 		Str("symbol", symbolStr).
@@ -1163,7 +1216,7 @@ func (mb *MarginBot) logSimulationSummary() {
 }
 
 func (mb *MarginBot) LogFinalSimulationSummary() {
-	if !mb.cfg.GeneralConfig.SimulationMode || mb.simLogger == nil {
+	if mb.simLogger == nil {
 		return
 	}
 
@@ -1220,4 +1273,38 @@ func (mb *MarginBot) LogFinalSimulationSummary() {
 	logger.InfoFmt("Total Volume: %s USDT", mb.simStats.TotalVolume.StringFixed(2))
 	logger.InfoFmt("Runtime: %v", runTime.Round(time.Second))
 	logger.InfoFmt("========================================")
+}
+
+// ClosedPositions returns the closed positions map (for statistics)
+func (mb *MarginBot) ClosedPositions() map[string][]ClosedMarginPosition {
+	mb.mu.RLock()
+	defer mb.mu.RUnlock()
+	return mb.closedPositions
+}
+
+// GetSimStats returns a copy of the simulation statistics
+func (mb *MarginBot) GetSimStats() *SimulationStats {
+	mb.mu.RLock()
+	defer mb.mu.RUnlock()
+
+	if mb.simStats == nil {
+		return nil
+	}
+
+	mb.simStats.mu.RLock()
+	defer mb.simStats.mu.RUnlock()
+
+	// Return a copy to avoid race conditions
+	return &SimulationStats{
+		TotalTrades:     mb.simStats.TotalTrades,
+		WinningTrades:   mb.simStats.WinningTrades,
+		LosingTrades:    mb.simStats.LosingTrades,
+		TotalPnL:        mb.simStats.TotalPnL,
+		TotalPnLPercent: mb.simStats.TotalPnLPercent,
+		BestTradePnL:    mb.simStats.BestTradePnL,
+		WorstTradePnL:   mb.simStats.WorstTradePnL,
+		TotalVolume:     mb.simStats.TotalVolume,
+		StartTime:       mb.simStats.StartTime,
+		LastTradeTime:   mb.simStats.LastTradeTime,
+	}
 }

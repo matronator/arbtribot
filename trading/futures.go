@@ -44,17 +44,28 @@ type SimulationStats struct {
 	mu              sync.RWMutex
 }
 
+type ClosedFuturesPosition struct {
+	EntryPosition FuturesPosition
+	ClosingPrice  string
+	ClosingTime   time.Time
+	Profit        string
+	PnLPercent    string
+	Reason        string
+	HoldDuration  string
+}
+
 type FuturesBot struct {
-	ob             *arbitrage.Orderbook
-	cfg            *utils.Config
-	tradeLogger    *zerolog.Logger
-	simLogger      *zerolog.Logger
-	futuresClient  *futures.Client
-	trackedSymbols []currency.Pair
-	positions      map[string]*FuturesPosition
-	history        map[string][]PricePoint
-	simStats       *SimulationStats
-	mu             sync.RWMutex
+	ob              *arbitrage.Orderbook
+	cfg             *utils.Config
+	tradeLogger     *zerolog.Logger
+	simLogger       *zerolog.Logger
+	futuresClient   *futures.Client
+	trackedSymbols  []currency.Pair
+	positions       map[string]*FuturesPosition
+	closedPositions map[string][]ClosedFuturesPosition
+	history         map[string][]PricePoint
+	simStats        *SimulationStats
+	mu              sync.RWMutex
 }
 
 func NewFuturesBot(ob *arbitrage.Orderbook, cfg *utils.Config, futuresClient *futures.Client, tradeLogger *zerolog.Logger) *FuturesBot {
@@ -114,15 +125,16 @@ func NewFuturesBot(ob *arbitrage.Orderbook, cfg *utils.Config, futuresClient *fu
 	}
 
 	return &FuturesBot{
-		ob:             ob,
-		cfg:            cfg,
-		tradeLogger:    tradeLogger,
-		simLogger:      simLogger,
-		futuresClient:  futuresClient,
-		trackedSymbols: tracked,
-		positions:      positions,
-		history:        history,
-		simStats:       simStats,
+		ob:              ob,
+		cfg:             cfg,
+		tradeLogger:     tradeLogger,
+		simLogger:       simLogger,
+		futuresClient:   futuresClient,
+		trackedSymbols:  tracked,
+		positions:       positions,
+		closedPositions: make(map[string][]ClosedFuturesPosition),
+		history:         history,
+		simStats:        simStats,
 	}
 }
 
@@ -611,9 +623,28 @@ func (fb *FuturesBot) closePosition(symbolStr string, exitPrice udecimal.Decimal
 	position.Status = "CLOSED"
 	delete(fb.positions, symbolStr)
 
-	// Update simulation statistics
+	// Create closed position record
+	closedPosition := ClosedFuturesPosition{
+		EntryPosition: *position,
+		ClosingPrice:  exitPrice.StringFixed(8),
+		ClosingTime:   time.Now(),
+		Profit:        profitAmount.StringFixed(6),
+		PnLPercent:    effectivePnL.Mul(udecimal.MustFromFloat64(100)).StringFixed(4),
+		Reason:        reason,
+		HoldDuration:  holdDuration.Round(time.Second).String(),
+	}
+
+	// Store closed position
+	if fb.closedPositions[symbolStr] == nil {
+		fb.closedPositions[symbolStr] = make([]ClosedFuturesPosition, 0)
+	}
+	fb.closedPositions[symbolStr] = append(fb.closedPositions[symbolStr], closedPosition)
+
+	// Update statistics (always track stats, regardless of simulation mode)
+	fb.updateSimStats(profitAmount, effectivePnL, position.Notional, holdDuration)
+
+	// Log simulation trade if in simulation mode
 	if fb.cfg.GeneralConfig.SimulationMode && fb.simLogger != nil {
-		fb.updateSimStats(profitAmount, effectivePnL, position.Notional, holdDuration)
 		fb.logSimulationTrade("CLOSE", symbolStr, position, exitPrice, effectivePnL, profitAmount, reason, holdDuration)
 	}
 
@@ -882,4 +913,38 @@ func (fb *FuturesBot) LogFinalSimulationSummary() {
 	logger.InfoFmt("Total Volume: %s USDT", fb.simStats.TotalVolume.StringFixed(2))
 	logger.InfoFmt("Runtime: %v", runTime.Round(time.Second))
 	logger.InfoFmt("========================================")
+}
+
+// ClosedPositions returns the closed positions map (for statistics)
+func (fb *FuturesBot) ClosedPositions() map[string][]ClosedFuturesPosition {
+	fb.mu.RLock()
+	defer fb.mu.RUnlock()
+	return fb.closedPositions
+}
+
+// GetSimStats returns a copy of the simulation statistics
+func (fb *FuturesBot) GetSimStats() *SimulationStats {
+	fb.mu.RLock()
+	defer fb.mu.RUnlock()
+
+	if fb.simStats == nil {
+		return nil
+	}
+
+	fb.simStats.mu.RLock()
+	defer fb.simStats.mu.RUnlock()
+
+	// Return a copy to avoid race conditions
+	return &SimulationStats{
+		TotalTrades:     fb.simStats.TotalTrades,
+		WinningTrades:   fb.simStats.WinningTrades,
+		LosingTrades:    fb.simStats.LosingTrades,
+		TotalPnL:        fb.simStats.TotalPnL,
+		TotalPnLPercent: fb.simStats.TotalPnLPercent,
+		BestTradePnL:    fb.simStats.BestTradePnL,
+		WorstTradePnL:   fb.simStats.WorstTradePnL,
+		TotalVolume:     fb.simStats.TotalVolume,
+		StartTime:       fb.simStats.StartTime,
+		LastTradeTime:   fb.simStats.LastTradeTime,
+	}
 }

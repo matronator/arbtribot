@@ -372,6 +372,9 @@ func LoadPositions(tradingBot *TradingBot, marginBot *MarginBot, futuresBot *Fut
 	if loadedCount > 0 {
 		logger.InfoFmt("Loaded %d open positions from %s (saved at %s)",
 			loadedCount, positionsFileName, data.SavedAt.Format(time.RFC3339))
+
+		os.Remove(positionsFileName)
+		logger.InfoFmt("Removed empty positions file")
 	}
 
 	return nil
