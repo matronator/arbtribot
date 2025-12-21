@@ -84,6 +84,7 @@ type MarginConfig struct {
 	EntryChange      float64  // Minimum absolute price move to open a position
 	LookbackPoints   int      // History points to evaluate momentum
 	CheckInterval    int      // Seconds between evaluation cycles
+	MaxHoldTime      int      // Maximum hold time in minutes
 	BaseAsset        string   // Margin quote asset, e.g., USDT
 	QuoteAssets      []string // Coins to trade against the base asset
 	MarginType       string   // "ISOLATED" or "CROSS" margin type
@@ -153,9 +154,10 @@ func LoadConfig() *Config {
 				EntryChange:      0.006,
 				LookbackPoints:   20,
 				CheckInterval:    5,
+				MaxHoldTime:      30,
 				BaseAsset:        "USDT",
 				QuoteAssets:      []string{"BTC", "ETH", "BNB"},
-				MarginType:       "ISOLATED",
+				MarginType:       "CROSS",
 			},
 		}
 	}
@@ -366,6 +368,12 @@ func LoadConfig() *Config {
 		marginCheckInterval = 5
 	}
 
+	marginMaxHoldTime, err := strconv.Atoi(os.Getenv("MARGIN_MAX_HOLD_TIME"))
+	if err != nil {
+		log.Warn().Err(err).Msg("Error parsing MARGIN_MAX_HOLD_TIME from .env file, using default 30 minutes")
+		marginMaxHoldTime = 30
+	}
+
 	marginBaseAsset := os.Getenv("MARGIN_BASE_ASSET")
 	if marginBaseAsset == "" {
 		marginBaseAsset = "USDT"
@@ -445,6 +453,7 @@ func LoadConfig() *Config {
 			EntryChange:      marginEntryChange,
 			LookbackPoints:   marginLookbackPoints,
 			CheckInterval:    marginCheckInterval,
+			MaxHoldTime:      marginMaxHoldTime,
 			BaseAsset:        marginBaseAsset,
 			QuoteAssets:      marginQuoteAssets,
 			MarginType:       marginType,

@@ -357,14 +357,14 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		// Time-based exit
 		// Only close on timeout if position is profitable (P&L > 0)
 		// If losing money, keep it open unless stop loss is reached
-		maxHoldTime := time.Duration(mb.cfg.NormalConfig.MaxHoldTime) * time.Minute
+		maxHoldTime := time.Duration(mb.cfg.MarginConfig.MaxHoldTime) * time.Minute
 		if holdDuration > maxHoldTime {
 			if effectivePnL.Cmp(udecimal.Zero) >= 0 {
 				logger.InfoFmt("%s for %s: P&L=%s%%. Closing position. Entry=%s Exit=%s", logger.Blue("Max hold time reached"), symbolStr, logger.ColorizePnl(pnlPercent), position.EntryPrice.StringFixed(8), currentPrice.StringFixed(8))
 				mb.closePosition(symbolStr, currentPrice, "TIMEOUT")
 			} else {
 				if mb.cfg.GeneralConfig.VerboseLogging {
-					logger.DebugFmt("Max hold time reached for %s but position is unprofitable (P&L=%s). Keeping position open until stop loss.", symbolStr, logger.ColorizePnl(pnlPercent))
+					logger.DebugFmt("Max hold time reached for %s but position is unprofitable (P&L=%s). Keeping position open until it becomes profitable or stop loss is reached.", symbolStr, logger.ColorizePnl(pnlPercent))
 				}
 			}
 			continue
