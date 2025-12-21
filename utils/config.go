@@ -30,6 +30,7 @@ type GeneralConfig struct {
 	WdEnabled      bool
 	TradingMode    string // "triangle", "grid" or "normal" - determines which trading strategy to use
 	Futures        bool   // true = futures trading, false = spot trading
+	DashboardPort  string // Port for the web dashboard (default "8080")
 }
 
 type GridConfig struct {
@@ -107,6 +108,7 @@ func LoadConfig() *Config {
 				WdEnabled:      false,
 				TradingMode:    "grid", // Default to grid trading
 				Futures:        false,
+				DashboardPort:  "8869", // Default dashboard port
 			},
 			GridConfig: &GridConfig{
 				GridMinPriceChange: 0.005, // 0.5% minimum price change
@@ -393,6 +395,11 @@ func LoadConfig() *Config {
 		marginType = "ISOLATED"
 	}
 
+	dashboardPort := os.Getenv("DASHBOARD_PORT")
+	if dashboardPort == "" {
+		dashboardPort = "8869"
+	}
+
 	return &Config{
 		GeneralConfig: &GeneralConfig{
 			SimulationMode: os.Getenv("SIMULATION_MODE") == "true",
@@ -406,6 +413,7 @@ func LoadConfig() *Config {
 			WdEnabled:      os.Getenv("WD_ENABLED") == "true",
 			TradingMode:    os.Getenv("TRADING_MODE"),
 			Futures:        os.Getenv("FUTURES") == "true",
+			DashboardPort:  dashboardPort,
 		},
 		GridConfig: &GridConfig{
 			GridMinPriceChange: gridMinPriceChange,

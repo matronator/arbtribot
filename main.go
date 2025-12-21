@@ -3,6 +3,7 @@ package main
 import (
 	"arbtribot/arbitrage"
 	"arbtribot/currency"
+	"arbtribot/dashboard"
 	"arbtribot/grid"
 	"arbtribot/logger"
 	"arbtribot/trading"
@@ -13,7 +14,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -36,6 +36,7 @@ var TradingBot *trading.TradingBot
 var FuturesBot *trading.FuturesBot
 var MarginBot *trading.MarginBot
 var positionsLoaded = false
+var DashboardServer *dashboard.Server
 
 // connectBookTickerWithReconnect handles WebSocket connection with automatic reconnection
 // for single symbol book ticker streams
@@ -375,22 +376,32 @@ func main() {
 	}
 	logger.InfoFmt("OrderBook filled with %d symbols.", added)
 
+	// Start dashboard server
+	DashboardServer = dashboard.NewServer(cfg.GeneralConfig.DashboardPort, cfg, OrderBook)
+	DashboardServer.SetClients(client, futuresClient)
+	go func() {
+		if err := DashboardServer.Start(); err != nil {
+			logger.WarningFmt("Dashboard server error: %v", err)
+		}
+	}()
+	// logger.InfoFmt("%s", logger.Green("Dashboard server started on http://localhost:"+cfg.GeneralConfig.DashboardPort))
+
 	// Check trading mode and start appropriate strategy
 	switch cfg.GeneralConfig.TradingMode {
 	case "grid":
-		logger.InfoFmt("%s", logger.Green("Starting Grid Trading Mode..."))
+		logger.InfoFmt("%s", logger.Blue("Starting Grid Trading Mode..."))
 		startGridTrading(OrderBook)
 	case "triangle":
-		logger.InfoFmt("%s", logger.Green("Starting Triangle Arbitrage Mode..."))
+		logger.InfoFmt("%s", logger.Blue("Starting Triangle Arbitrage Mode..."))
 		startTriangleArbitrage()
 	case "futures":
-		logger.InfoFmt("%s", logger.Green("Starting Futures Trading Mode..."))
+		logger.InfoFmt("%s", logger.Blue("Starting Futures Trading Mode..."))
 		startFuturesTrading(OrderBook)
 	case "margin":
-		logger.InfoFmt("%s", logger.Green("Starting Margin Trading Mode..."))
+		logger.InfoFmt("%s", logger.Blue("Starting Margin Trading Mode..."))
 		startMarginTrading(OrderBook)
 	case "normal":
-		logger.InfoFmt("%s", logger.Green(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
+		logger.InfoFmt("%s", logger.Blue(fmt.Sprintf("Starting %s...", "Normal Trading Mode")))
 		startNormalTrading(OrderBook)
 	}
 
@@ -422,6 +433,9 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 	// return
 
 	TradingBot = trading.NewTradingBot(ob, &SimTradeLogger)
+	if DashboardServer != nil {
+		DashboardServer.SetBots(TradingBot, MarginBot, FuturesBot, GridBot)
+	}
 
 	// Load saved positions after bot initialization
 	gridPositionsMap := make(map[string]interface{})
@@ -507,6 +521,9 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 	}
 
 	FuturesBot = trading.NewFuturesBot(ob, cfg, futuresClient, &SimTradeLogger)
+	if DashboardServer != nil {
+		DashboardServer.SetBots(TradingBot, MarginBot, FuturesBot, GridBot)
+	}
 
 	// Load saved positions after bot initialization
 	gridPositionsMap := make(map[string]interface{})
@@ -611,6 +628,9 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 	}
 
 	MarginBot = trading.NewMarginBot(ob, cfg, client, &SimTradeLogger)
+	if DashboardServer != nil {
+		DashboardServer.SetBots(TradingBot, MarginBot, FuturesBot, GridBot)
+	}
 
 	// Load saved positions after bot initialization
 	gridPositionsMap := make(map[string]interface{})
@@ -640,8 +660,7 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 	var wg sync.WaitGroup
 	stopCh := make(chan struct{})
 	errCh := make(chan error)
-	symbolsStr := strings.Join(symbols, ", ")
-	logger.InfoFmt("Starting margin websocket streams for %s.", symbolsStr)
+	logger.InfoFmt("Starting margin websocket streams for %s symbols.", logger.Magenta(strconv.Itoa(len(symbols))))
 
 	for i := 0; i < len(symbols); i++ {
 		symbol := symbols[i]
@@ -961,6 +980,9 @@ func restoreGridPositions(gridPositionsMap map[string]any) {
 func startGridTrading(ob *arbitrage.Orderbook) {
 	// Create grid trading bot
 	GridBot = grid.NewGridTradingBot(cfg, client, ob, &SimTradeLogger)
+	if DashboardServer != nil {
+		DashboardServer.SetBots(TradingBot, MarginBot, FuturesBot, GridBot)
+	}
 
 	// Load saved positions after bot initialization
 	gridPositionsMap := make(map[string]interface{})
