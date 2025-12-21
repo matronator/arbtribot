@@ -43,9 +43,10 @@ func (h *BookTickerHandler) HandleBookTickerEvent(event *binance.WsBookTickerEve
 
 	if val, ok := h.orderbook.Symbols.Get(event.Symbol); ok {
 		currentBook := val.GetBookTicker()
+		pricesChanged := true
 		if currentBook != nil {
 			if event.BestAskPrice == currentBook.AskPrice && event.BestBidPrice == currentBook.BidPrice {
-				return
+				pricesChanged = false
 			}
 		}
 
@@ -57,6 +58,8 @@ func (h *BookTickerHandler) HandleBookTickerEvent(event *binance.WsBookTickerEve
 			UpdateID: bookTicker.UpdateID,
 		}
 
+		// Always update to refresh LastUpdated timestamp, even if prices haven't changed
+		// This ensures we know the websocket connection is still alive
 		updated, err := h.orderbook.UpdateBookTicker(event.Symbol, bookCopy)
 		if err != nil {
 			logger.Error(err)
@@ -68,8 +71,8 @@ func (h *BookTickerHandler) HandleBookTickerEvent(event *binance.WsBookTickerEve
 			return
 		}
 
-		// Debug: Log price updates
-		if h.orderbook.Config.GeneralConfig.TraceLogging {
+		// Debug: Log price updates (only when prices actually changed)
+		if pricesChanged && h.orderbook.Config.GeneralConfig.TraceLogging {
 			logger.TraceFmt("Updated %s: Ask=%s, Bid=%s", event.Symbol, bookCopy.AskPrice, bookCopy.BidPrice)
 		}
 

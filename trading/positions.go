@@ -86,7 +86,7 @@ type GridPositionData struct {
 }
 
 // SavePositions saves all open positions to a JSON file
-func SavePositions(tradingBot *TradingBot, marginBot *MarginBot, futuresBot *FuturesBot, gridPositions map[string]any, loaded bool) error {
+func SavePositions(tradingBot *TradingBot, marginBot *MarginBot, futuresBot *FuturesBot, gridPositions map[string]any, loaded bool, silent bool) error {
 	data := &PositionData{
 		SavedAt: time.Now(),
 	}
@@ -224,9 +224,12 @@ func SavePositions(tradingBot *TradingBot, marginBot *MarginBot, futuresBot *Fut
 		return fmt.Errorf("failed to encode positions: %w", err)
 	}
 
-	logger.InfoFmt("Saved %d open positions to %s",
-		len(data.NormalPositions)+len(data.MarginPositions)+len(data.FuturesPositions)+len(data.GridPositions),
-		positionsFileName)
+	if !silent {
+		logger.InfoFmt("Saved %d open positions to %s",
+			len(data.NormalPositions)+len(data.MarginPositions)+len(data.FuturesPositions)+len(data.GridPositions),
+			positionsFileName)
+	}
+
 	return nil
 }
 

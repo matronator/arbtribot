@@ -37,6 +37,292 @@ var FuturesBot *trading.FuturesBot
 var MarginBot *trading.MarginBot
 var positionsLoaded = false
 
+// connectBookTickerWithReconnect handles WebSocket connection with automatic reconnection
+// for single symbol book ticker streams
+func connectBookTickerWithReconnect(
+	client *binance.WebsocketStreamClient,
+	symbol string,
+	handler *BookTickerHandler,
+	stopCh <-chan struct{},
+	errCh chan<- error,
+) {
+	const (
+		initialBackoff    = 1 * time.Second
+		maxBackoff        = 60 * time.Second
+		backoffMultiplier = 2.0
+		// Binance connections last 24 hours, reconnect proactively at 23.5 hours
+		reconnectBeforeExpiry = 23*time.Hour + 30*time.Minute
+	)
+
+	backoff := initialBackoff
+	reconnectCount := 0
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
+		connectionStartTime := time.Now()
+		doneCh, stop, err := client.WsBookTickerServe(
+			symbol,
+			handler.HandleBookTickerEvent,
+			handler.HandleError,
+		)
+		if err != nil {
+			logger.WarningFmt("Failed to connect WebSocket for %s: %v. Retrying in %v...", symbol, err, backoff)
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * backoffMultiplier)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+		}
+
+		// Connection successful, reset backoff
+		if reconnectCount > 0 {
+			logger.InfoFmt("Successfully reconnected WebSocket for %s (attempt %d)", symbol, reconnectCount+1)
+		}
+		backoff = initialBackoff
+		reconnectCount = 0
+
+		// Set up proactive reconnection timer for 24-hour limit
+		reconnectTimer := time.NewTimer(reconnectBeforeExpiry)
+
+		// Wait for connection to close, stop signal, or 24-hour timer
+		select {
+		case <-stopCh:
+			reconnectTimer.Stop()
+			stop <- struct{}{}
+			return
+		case <-reconnectTimer.C:
+			// Proactively reconnect before 24-hour expiry
+			connectionAge := time.Since(connectionStartTime)
+			logger.InfoFmt("Proactively reconnecting WebSocket for %s after %v (before 24h expiry)", symbol, connectionAge)
+			stop <- struct{}{}
+			// Wait a moment for clean shutdown, then reconnect
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(1 * time.Second):
+				// Continue to reconnect
+			}
+		case <-doneCh:
+			reconnectTimer.Stop()
+			reconnectCount++
+			logger.WarningFmt("WebSocket connection closed for %s. Reconnecting in %v... (attempt %d)", symbol, backoff, reconnectCount)
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * backoffMultiplier)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+		}
+	}
+}
+
+// connectCombinedBookTickerWithReconnect handles WebSocket connection with automatic reconnection
+// for combined (multi-symbol) book ticker streams
+func connectCombinedBookTickerWithReconnect(
+	client *binance.WebsocketStreamClient,
+	symbols []string,
+	handler *BookTickerHandler,
+	stopCh <-chan struct{},
+	errCh chan<- error,
+) {
+	const (
+		initialBackoff    = 1 * time.Second
+		maxBackoff        = 60 * time.Second
+		backoffMultiplier = 2.0
+		// Binance connections last 24 hours, reconnect proactively at 23.5 hours
+		reconnectBeforeExpiry = 23*time.Hour + 30*time.Minute
+	)
+
+	backoff := initialBackoff
+	reconnectCount := 0
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
+		connectionStartTime := time.Now()
+		doneCh, stop, err := client.WsCombinedBookTickerServe(
+			symbols,
+			handler.HandleBookTickerEvent,
+			handler.HandleError,
+		)
+		if err != nil {
+			logger.WarningFmt("Failed to connect WebSocket for %d symbols: %v. Retrying in %v...", len(symbols), err, backoff)
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * backoffMultiplier)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+		}
+
+		// Connection successful, reset backoff
+		if reconnectCount > 0 {
+			logger.InfoFmt("Successfully reconnected WebSocket for %d symbols (attempt %d)", len(symbols), reconnectCount+1)
+		}
+		backoff = initialBackoff
+		reconnectCount = 0
+
+		// Set up proactive reconnection timer for 24-hour limit
+		reconnectTimer := time.NewTimer(reconnectBeforeExpiry)
+
+		// Wait for connection to close, stop signal, or 24-hour timer
+		select {
+		case <-stopCh:
+			reconnectTimer.Stop()
+			stop <- struct{}{}
+			return
+		case <-reconnectTimer.C:
+			// Proactively reconnect before 24-hour expiry
+			connectionAge := time.Since(connectionStartTime)
+			logger.InfoFmt("Proactively reconnecting WebSocket for %d symbols after %v (before 24h expiry)", len(symbols), connectionAge)
+			stop <- struct{}{}
+			// Wait a moment for clean shutdown, then reconnect
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(1 * time.Second):
+				// Continue to reconnect
+			}
+		case <-doneCh:
+			reconnectTimer.Stop()
+			reconnectCount++
+			logger.WarningFmt("WebSocket connection closed for %d symbols. Reconnecting in %v... (attempt %d)", len(symbols), backoff, reconnectCount)
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * backoffMultiplier)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+		}
+	}
+}
+
+// connectFuturesBookTickerWithReconnect handles WebSocket connection with automatic reconnection
+// for futures book ticker streams
+func connectFuturesBookTickerWithReconnect(
+	symbol string,
+	ob *arbitrage.Orderbook,
+	stopCh <-chan struct{},
+	errCh chan<- error,
+) {
+	const (
+		initialBackoff    = 1 * time.Second
+		maxBackoff        = 60 * time.Second
+		backoffMultiplier = 2.0
+		// Binance connections last 24 hours, reconnect proactively at 23.5 hours
+		reconnectBeforeExpiry = 23*time.Hour + 30*time.Minute
+	)
+
+	backoff := initialBackoff
+	reconnectCount := 0
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
+		connectionStartTime := time.Now()
+		doneCh, stop, err := futures.WsBookTickerServe(
+			symbol,
+			func(event *futures.WsBookTickerEvent) {
+				book := &arbitrage.BookTicker{
+					AskPrice: event.BestAskPrice,
+					AskQty:   event.BestAskQty,
+					BidPrice: event.BestBidPrice,
+					BidQty:   event.BestBidQty,
+					UpdateID: event.TransactionTime,
+				}
+				_, _ = ob.UpdateBookTicker(event.Symbol, book)
+			},
+			func(err error) {
+				logger.Error(err)
+			},
+		)
+		if err != nil {
+			logger.WarningFmt("Failed to connect futures WebSocket for %s: %v. Retrying in %v...", symbol, err, backoff)
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * backoffMultiplier)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+		}
+
+		// Connection successful, reset backoff
+		if reconnectCount > 0 {
+			logger.InfoFmt("Successfully reconnected futures WebSocket for %s (attempt %d)", symbol, reconnectCount+1)
+		}
+		backoff = initialBackoff
+		reconnectCount = 0
+
+		// Set up proactive reconnection timer for 24-hour limit
+		reconnectTimer := time.NewTimer(reconnectBeforeExpiry)
+
+		// Wait for connection to close, stop signal, or 24-hour timer
+		select {
+		case <-stopCh:
+			reconnectTimer.Stop()
+			stop <- struct{}{}
+			return
+		case <-reconnectTimer.C:
+			// Proactively reconnect before 24-hour expiry
+			connectionAge := time.Since(connectionStartTime)
+			logger.InfoFmt("Proactively reconnecting futures WebSocket for %s after %v (before 24h expiry)", symbol, connectionAge)
+			stop <- struct{}{}
+			// Wait a moment for clean shutdown, then reconnect
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(1 * time.Second):
+				// Continue to reconnect
+			}
+		case <-doneCh:
+			reconnectTimer.Stop()
+			reconnectCount++
+			logger.WarningFmt("Futures WebSocket connection closed for %s. Reconnecting in %v... (attempt %d)", symbol, backoff, reconnectCount)
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * backoffMultiplier)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+		}
+	}
+}
+
 func main() {
 	cmd := exec.Command("scripts/populator")
 	if err := cmd.Run(); err != nil {
@@ -161,23 +447,7 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 		go func(symbol string) {
 			defer wg.Done()
 			logger.InfoFmt("Starting websocket stream for %s.", symbol)
-			doneCh, stop, err := websocketStreamClient.WsBookTickerServe(
-				symbol,
-				handler.HandleBookTickerEvent,
-				handler.HandleError,
-			)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			// Wait for stop signal
-			select {
-			case <-stopCh:
-				stop <- struct{}{}
-			case <-doneCh:
-				return
-			}
+			connectBookTickerWithReconnect(websocketStreamClient, symbol, handler, stopCh, errCh)
 		}(symbol)
 	}
 
@@ -193,7 +463,7 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 		for {
 			select {
 			case <-positionSaveTicker.C:
-				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, true); err != nil {
 					logger.WarningFmt("Failed to save positions periodically: %v", err)
 				}
 			case <-positionSaveStop:
@@ -212,7 +482,7 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 	case <-quitChannel:
@@ -221,7 +491,7 @@ func startNormalTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 	}
@@ -267,33 +537,7 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		go func(symbol string) {
 			defer wg.Done()
 			logger.InfoFmt("Starting futures websocket stream for %s.", symbol)
-			doneCh, stop, err := futures.WsBookTickerServe(
-				symbol,
-				func(event *futures.WsBookTickerEvent) {
-					book := &arbitrage.BookTicker{
-						AskPrice: event.BestAskPrice,
-						AskQty:   event.BestAskQty,
-						BidPrice: event.BestBidPrice,
-						BidQty:   event.BestBidQty,
-						UpdateID: event.TransactionTime,
-					}
-					_, _ = ob.UpdateBookTicker(event.Symbol, book)
-				},
-				func(err error) {
-					errCh <- err
-				},
-			)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			select {
-			case <-stopCh:
-				stop <- struct{}{}
-			case <-doneCh:
-				return
-			}
+			connectFuturesBookTickerWithReconnect(symbol, ob, stopCh, errCh)
 		}(symbol)
 	}
 
@@ -311,7 +555,7 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		for {
 			select {
 			case <-positionSaveTicker.C:
-				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, true); err != nil {
 					logger.WarningFmt("Failed to save positions periodically: %v", err)
 				}
 			case <-positionSaveStop:
@@ -331,7 +575,7 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 		// Save statistics
@@ -343,7 +587,7 @@ func startFuturesTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 		// Save statistics
@@ -404,22 +648,7 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 		wg.Add(1)
 		go func(symbol string) {
 			defer wg.Done()
-			doneCh, stop, err := websocketStreamClient.WsBookTickerServe(
-				symbol,
-				handler.HandleBookTickerEvent,
-				handler.HandleError,
-			)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			select {
-			case <-stopCh:
-				stop <- struct{}{}
-			case <-doneCh:
-				return
-			}
+			connectBookTickerWithReconnect(websocketStreamClient, symbol, handler, stopCh, errCh)
 		}(symbol)
 	}
 
@@ -437,7 +666,7 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 		for {
 			select {
 			case <-positionSaveTicker.C:
-				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, true); err != nil {
 					logger.WarningFmt("Failed to save positions periodically: %v", err)
 				}
 			case <-positionSaveStop:
@@ -457,7 +686,7 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 		// Save statistics
@@ -469,7 +698,7 @@ func startMarginTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 		// Save statistics
@@ -537,7 +766,10 @@ func collectMarginStats(stats *utils.RunStatistics, bot *trading.MarginBot) {
 
 	// Collect individual orders from closed positions
 	closedPositions := bot.ClosedPositions()
+	totalClosedPositions := 0
 	for symbol, positions := range closedPositions {
+		totalClosedPositions += len(positions)
+		logger.DebugFmt("Collecting stats for %s: %d closed positions", symbol, len(positions))
 		for _, cp := range positions {
 			stats.Orders = append(stats.Orders, utils.OrderRecord{
 				Symbol:       symbol,
@@ -556,6 +788,7 @@ func collectMarginStats(stats *utils.RunStatistics, bot *trading.MarginBot) {
 			})
 		}
 	}
+	logger.InfoFmt("Collected %d total closed positions across %d symbols, %d orders in stats", totalClosedPositions, len(closedPositions), len(stats.Orders))
 }
 
 func collectFuturesStats(stats *utils.RunStatistics, bot *trading.FuturesBot) {
@@ -773,23 +1006,7 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 		go func(symbolsChunk []string) {
 			defer wg.Done()
 			logger.InfoFmt("Starting websocket stream for %d symbols.", len(symbolsChunk))
-			doneCh, stop, err := websocketStreamClient.WsCombinedBookTickerServe(
-				symbolsChunk,
-				handler.HandleBookTickerEvent,
-				handler.HandleError,
-			)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			// Wait for stop signal
-			select {
-			case <-stopCh:
-				stop <- struct{}{}
-			case <-doneCh:
-				return
-			}
+			connectCombinedBookTickerWithReconnect(websocketStreamClient, symbolsChunk, handler, stopCh, errCh)
 		}(chunk)
 	}
 
@@ -803,7 +1020,7 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 		for {
 			select {
 			case <-positionSaveTicker.C:
-				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+				if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, true); err != nil {
 					logger.WarningFmt("Failed to save positions periodically: %v", err)
 				}
 			case <-positionSaveStop:
@@ -823,7 +1040,7 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 		// Save statistics
@@ -834,7 +1051,7 @@ func startGridTrading(ob *arbitrage.Orderbook) {
 		positionSaveTicker.Stop()
 		close(positionSaveStop)
 		// Save positions before shutdown
-		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded); err != nil {
+		if err := trading.SavePositions(TradingBot, MarginBot, FuturesBot, getGridPositionsForSave(), positionsLoaded, false); err != nil {
 			logger.ErrorFmt("Failed to save positions: %v", err)
 		}
 		// Save statistics
@@ -882,23 +1099,7 @@ func startTriangleArbitrage() {
 		go func(symbolsChunk []string) {
 			defer wg.Done()
 			logger.InfoFmt("Starting websocket stream for %d symbols.", len(symbolsChunk))
-			doneCh, stop, err := websocketStreamClient.WsCombinedBookTickerServe(
-				symbolsChunk,
-				handler.HandleBookTickerEvent,
-				handler.HandleError,
-			)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			// Wait for stop signal
-			select {
-			case <-stopCh:
-				stop <- struct{}{}
-			case <-doneCh:
-				return
-			}
+			connectCombinedBookTickerWithReconnect(websocketStreamClient, symbolsChunk, handler, stopCh, errCh)
 		}(chunk)
 	}
 

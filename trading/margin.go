@@ -296,6 +296,19 @@ func (mb *MarginBot) evaluateExistingPositions() {
 			continue
 		}
 
+		// Check if price data is stale (older than 2 minutes)
+		timeSinceUpdate := time.Since(symbolData.LastUpdated)
+		if timeSinceUpdate > 2*time.Minute {
+			logger.WarningFmt("Stale price data for %s: LastUpdated=%v (%.0f seconds ago). Websocket may be disconnected.",
+				symbolStr, symbolData.LastUpdated, timeSinceUpdate.Seconds())
+		}
+
+		// Log book ticker data to verify prices are updating
+		if mb.cfg.GeneralConfig.VerboseLogging {
+			logger.DebugFmt("Book ticker for %s: Bid=%s Ask=%s LastUpdated=%v (%.0fs ago)",
+				symbolStr, book.BidPrice, book.AskPrice, symbolData.LastUpdated, timeSinceUpdate.Seconds())
+		}
+
 		currentPrice, err := midPrice(book)
 		if err != nil {
 			logger.ErrorFmt("Failed to parse price for %s: %v", symbolStr, err)
@@ -325,18 +338,18 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		}
 
 		holdDuration := time.Since(position.EntryTime)
-		effectivePnL.Mul(udecimal.MustFromFloat64(100))
+		pnlPercent := effectivePnL.Mul(udecimal.MustFromFloat64(100))
 
 		if mb.cfg.GeneralConfig.VerboseLogging {
 			logger.DebugFmt("Position %s %s: entry=%s current=%s P&L=%s%% hold=%v",
 				symbolStr, position.Side, position.EntryPrice.String(), currentPrice.String(),
-				logger.ColorizePnl(effectivePnL), holdDuration.Round(time.Second))
+				logger.ColorizePnl(pnlPercent), holdDuration.Round(time.Second))
 		}
 
 		// Stop loss
 		stopLossThreshold := udecimal.MustFromFloat64(-mb.cfg.MarginConfig.StopLoss)
 		if effectivePnL.Cmp(stopLossThreshold) <= 0 {
-			logger.InfoFmt("%s for %s: P&L=%s%% <= %.4f%%", logger.BrightRed("Stop loss triggered"), symbolStr, logger.ColorizePnl(effectivePnL), stopLossThreshold.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+			logger.InfoFmt("%s for %s: P&L=%s%% <= %.4f%%", logger.BrightRed("Stop loss triggered"), symbolStr, logger.ColorizePnl(pnlPercent), stopLossThreshold.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 			mb.closePosition(symbolStr, currentPrice, "STOP_LOSS")
 			continue
 		}
@@ -347,11 +360,11 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		maxHoldTime := time.Duration(mb.cfg.NormalConfig.MaxHoldTime) * time.Minute
 		if holdDuration > maxHoldTime {
 			if effectivePnL.Cmp(udecimal.Zero) >= 0 {
-				logger.InfoFmt("%s for %s: P&L=%s%%. Closing position.", logger.Blue("Max hold time reached"), symbolStr, logger.ColorizePnl(effectivePnL))
+				logger.InfoFmt("%s for %s: P&L=%s%%. Closing position. Entry=%s Exit=%s", logger.Blue("Max hold time reached"), symbolStr, logger.ColorizePnl(pnlPercent), position.EntryPrice.StringFixed(8), currentPrice.StringFixed(8))
 				mb.closePosition(symbolStr, currentPrice, "TIMEOUT")
 			} else {
 				if mb.cfg.GeneralConfig.VerboseLogging {
-					logger.DebugFmt("Max hold time reached for %s but position is unprofitable (P&L=%s). Keeping position open until stop loss.", symbolStr, logger.ColorizePnl(effectivePnL))
+					logger.DebugFmt("Max hold time reached for %s but position is unprofitable (P&L=%s). Keeping position open until stop loss.", symbolStr, logger.ColorizePnl(pnlPercent))
 				}
 			}
 			continue
@@ -361,7 +374,7 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		profitTarget := udecimal.MustFromFloat64(mb.cfg.MarginConfig.TrailingStart)
 		if effectivePnL.Cmp(profitTarget) >= 0 {
 			if mb.shouldTriggerTrail(position, currentPrice) {
-				logger.InfoFmt("%s for %s: P&L=%s%% >= %.4f%%", logger.BrightGreen("Trailing exit triggered"), symbolStr, logger.ColorizePnl(effectivePnL), profitTarget.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
+				logger.InfoFmt("%s for %s: P&L=%s%% >= %.4f%%", logger.BrightGreen("Trailing exit triggered"), symbolStr, logger.ColorizePnl(pnlPercent), profitTarget.Mul(udecimal.MustFromFloat64(100)).InexactFloat64())
 				mb.closePosition(symbolStr, currentPrice, "TRAILING_EXIT")
 				continue
 			} else if mb.cfg.GeneralConfig.VerboseLogging {
@@ -441,6 +454,19 @@ func (mb *MarginBot) scanForEntries() int {
 		if mb.cfg.GeneralConfig.VerboseLogging {
 			logger.DebugFmt("Momentum analysis for %s: change=%.4f%%, threshold=±%.4f%%, history_points=%d",
 				symbolStr, changeFloat, thresholdFloat, len(history))
+		}
+
+		// Check if this symbol is in cooldown (for temporary errors like -3045)
+		if cooldownExpiry, exists := mb.cooldownUntil[symbolStr]; exists {
+			if time.Now().Before(cooldownExpiry) {
+				remaining := time.Until(cooldownExpiry).Round(time.Second)
+				if mb.cfg.GeneralConfig.VerboseLogging {
+					logger.DebugFmt("Skipping %s: symbol in cooldown (remaining: %v)", symbolStr, remaining)
+				}
+				continue
+			}
+			// Cooldown expired, remove it
+			delete(mb.cooldownUntil, symbolStr)
 		}
 
 		if change.Cmp(threshold) >= 0 {
@@ -543,19 +569,6 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 			logger.DebugFmt("Skipping %s %s: symbol marked as unsupported (%s)", side, symbolStr, reason)
 		}
 		return
-	}
-
-	// Check if this symbol is in cooldown (for temporary errors like -3045)
-	if cooldownExpiry, exists := mb.cooldownUntil[symbolStr]; exists {
-		if time.Now().Before(cooldownExpiry) {
-			remaining := time.Until(cooldownExpiry).Round(time.Second)
-			if mb.cfg.GeneralConfig.VerboseLogging {
-				logger.DebugFmt("Skipping %s %s: symbol in cooldown (remaining: %v)", side, symbolStr, remaining)
-			}
-			return
-		}
-		// Cooldown expired, remove it
-		delete(mb.cooldownUntil, symbolStr)
 	}
 
 	symbolData, ok := mb.ob.Symbols.Get(symbolStr)
@@ -834,6 +847,11 @@ func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal,
 		mb.closedPositions[symbolStr] = make([]ClosedMarginPosition, 0)
 	}
 	mb.closedPositions[symbolStr] = append(mb.closedPositions[symbolStr], closedPosition)
+
+	// Log the total number of closed positions for this symbol (for debugging)
+	if mb.cfg.GeneralConfig.VerboseLogging {
+		logger.DebugFmt("Stored closed position for %s: total closed positions for this symbol = %d", symbolStr, len(mb.closedPositions[symbolStr]))
+	}
 
 	// Update statistics (always track stats, regardless of simulation mode)
 	mb.updateSimStats(profitAmount, position.Notional)
@@ -1275,11 +1293,20 @@ func (mb *MarginBot) LogFinalSimulationSummary() {
 	logger.InfoFmt("========================================")
 }
 
-// ClosedPositions returns the closed positions map (for statistics)
+// ClosedPositions returns a deep copy of the closed positions map (for statistics)
 func (mb *MarginBot) ClosedPositions() map[string][]ClosedMarginPosition {
 	mb.mu.RLock()
 	defer mb.mu.RUnlock()
-	return mb.closedPositions
+
+	// Return a deep copy to avoid race conditions and ensure data consistency
+	result := make(map[string][]ClosedMarginPosition, len(mb.closedPositions))
+	for symbol, positions := range mb.closedPositions {
+		// Create a copy of the slice
+		positionsCopy := make([]ClosedMarginPosition, len(positions))
+		copy(positionsCopy, positions)
+		result[symbol] = positionsCopy
+	}
+	return result
 }
 
 // GetSimStats returns a copy of the simulation statistics

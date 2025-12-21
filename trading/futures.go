@@ -915,11 +915,20 @@ func (fb *FuturesBot) LogFinalSimulationSummary() {
 	logger.InfoFmt("========================================")
 }
 
-// ClosedPositions returns the closed positions map (for statistics)
+// ClosedPositions returns a deep copy of the closed positions map (for statistics)
 func (fb *FuturesBot) ClosedPositions() map[string][]ClosedFuturesPosition {
 	fb.mu.RLock()
 	defer fb.mu.RUnlock()
-	return fb.closedPositions
+
+	// Return a deep copy to avoid race conditions and ensure data consistency
+	result := make(map[string][]ClosedFuturesPosition, len(fb.closedPositions))
+	for symbol, positions := range fb.closedPositions {
+		// Create a copy of the slice
+		positionsCopy := make([]ClosedFuturesPosition, len(positions))
+		copy(positionsCopy, positions)
+		result[symbol] = positionsCopy
+	}
+	return result
 }
 
 // GetSimStats returns a copy of the simulation statistics
