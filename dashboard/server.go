@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -71,6 +72,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/recent-trades", s.handleRecentTrades)
 	mux.HandleFunc("/api/orderbook", s.handleOrderBook)
+	mux.HandleFunc("/api/close-position", s.handleClosePosition)
 
 	// Serve static files (dashboard HTML/CSS/JS)
 	mux.HandleFunc("/", s.handleDashboard)
@@ -121,7 +123,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		if s.marginBot != nil {
 			botPositions := s.marginBot.Positions()
 			for symbol, pos := range botPositions {
-				currentPrice := s.getCurrentPrice(symbol)
+				currentPrice := s.getCurrentPrice(symbol, pos.Side)
 				unrealizedPnL := s.calculateUnrealizedPnL(pos.EntryPrice, currentPrice, pos.Quantity, pos.Side)
 				unrealizedPnLPercent := s.calculateUnrealizedPnLPercent(pos.EntryPrice, currentPrice, pos.Side)
 
@@ -144,7 +146,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		if s.futuresBot != nil {
 			botPositions := s.futuresBot.Positions()
 			for symbol, pos := range botPositions {
-				currentPrice := s.getCurrentPrice(symbol)
+				currentPrice := s.getCurrentPrice(symbol, pos.Side)
 				unrealizedPnL := s.calculateUnrealizedPnL(pos.EntryPrice, currentPrice, pos.Quantity, pos.Side)
 				unrealizedPnLPercent := s.calculateUnrealizedPnLPercent(pos.EntryPrice, currentPrice, pos.Side)
 
@@ -174,7 +176,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 			s.gridBot.Mu().RLock()
 			for symbol, pos := range s.gridBot.Positions {
 				if pos.Status == "OPEN" {
-					currentPrice := s.getCurrentPrice(symbol)
+					currentPrice := s.getCurrentPrice(symbol, "LONG")
 					entryPriceDec := udecimal.MustFromFloat64(pos.EntryPrice)
 					quantityDec := udecimal.MustFromFloat64(pos.Quantity)
 					unrealizedPnL := currentPrice.Sub(entryPriceDec).Mul(quantityDec)
@@ -205,6 +207,12 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 			s.gridBot.Mu().RUnlock()
 		}
 	}
+
+	sort.SliceStable(positions, func(i, j int) bool {
+		symbolI, _ := positions[i]["symbol"].(string)
+		symbolJ, _ := positions[j]["symbol"].(string)
+		return symbolI < symbolJ
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(positions)
@@ -390,6 +398,12 @@ func (s *Server) handleRecentTrades(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Sort by exit time (most recent first) and limit to 50
+	sort.SliceStable(trades, func(i, j int) bool {
+		exitTimeI, _ := time.Parse(time.RFC3339, trades[i]["exitTime"].(string))
+		exitTimeJ, _ := time.Parse(time.RFC3339, trades[j]["exitTime"].(string))
+		return exitTimeI.After(exitTimeJ)
+	})
+
 	if len(trades) > 50 {
 		trades = trades[len(trades)-50:]
 	}
@@ -413,7 +427,7 @@ func (s *Server) handleOrderBook(w http.ResponseWriter, r *http.Request) {
 
 // Helper functions
 
-func (s *Server) getCurrentPrice(symbol string) udecimal.Decimal {
+func (s *Server) getCurrentPrice(symbol string, side string) udecimal.Decimal {
 	symbolObj, ok := s.orderBook.Symbols.Get(symbol)
 	if !ok {
 		return udecimal.Zero
@@ -422,21 +436,20 @@ func (s *Server) getCurrentPrice(symbol string) udecimal.Decimal {
 	if bookTicker == nil {
 		return udecimal.Zero
 	}
-	// Parse string prices to decimal and calculate mid price
-	bidPrice, err := udecimal.Parse(bookTicker.BidPrice)
-	if err != nil {
-		return udecimal.Zero
+	// Use exit price for PnL calculations: Bid for LONG (sell at bid), Ask for SHORT (buy back at ask)
+	if side == "LONG" {
+		bidPrice, err := udecimal.Parse(bookTicker.BidPrice)
+		if err != nil {
+			return udecimal.Zero
+		}
+		return bidPrice
+	} else { // SHORT
+		askPrice, err := udecimal.Parse(bookTicker.AskPrice)
+		if err != nil {
+			return udecimal.Zero
+		}
+		return askPrice
 	}
-	askPrice, err := udecimal.Parse(bookTicker.AskPrice)
-	if err != nil {
-		return udecimal.Zero
-	}
-	// Use mid price
-	mid, err := bidPrice.Add(askPrice).Div(udecimal.MustFromFloat64(2))
-	if err != nil {
-		return udecimal.Zero
-	}
-	return mid
 }
 
 func (s *Server) calculateUnrealizedPnL(entryPrice, currentPrice, quantity udecimal.Decimal, side string) udecimal.Decimal {
@@ -462,4 +475,69 @@ func (s *Server) calculateUnrealizedPnLPercent(entryPrice, currentPrice udecimal
 		}
 		return udecimal.Zero
 	}
+}
+
+// handleClosePosition handles requests to close a position
+func (s *Server) handleClosePosition(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Symbol string `json:"symbol"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Symbol == "" {
+		http.Error(w, "Symbol is required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var err error
+	switch s.cfg.GeneralConfig.TradingMode {
+	case "margin":
+		if s.marginBot != nil {
+			err = s.marginBot.ClosePosition(req.Symbol)
+		} else {
+			err = fmt.Errorf("margin bot not initialized")
+		}
+	case "futures":
+		if s.futuresBot != nil {
+			err = s.futuresBot.ClosePosition(req.Symbol)
+		} else {
+			err = fmt.Errorf("futures bot not initialized")
+		}
+	case "normal":
+		// Normal trading bot doesn't have ClosePosition yet
+		err = fmt.Errorf("close position not supported for normal trading mode")
+	case "grid":
+		// Grid bot doesn't have ClosePosition yet
+		err = fmt.Errorf("close position not supported for grid trading mode")
+	default:
+		err = fmt.Errorf("unsupported trading mode: %s", s.cfg.GeneralConfig.TradingMode)
+	}
+
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Position %s closed successfully", req.Symbol),
+	})
 }

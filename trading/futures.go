@@ -314,7 +314,8 @@ func (fb *FuturesBot) evaluateExistingPositions() {
 			continue
 		}
 
-		currentPrice, err := midPrice(book)
+		// Use exit price for PnL calculations (Bid for LONG to sell, Ask for SHORT to buy back)
+		currentPrice, err := getExitPrice(book, position.Side)
 		if err != nil {
 			logger.ErrorFmt("Failed to parse price for %s: %v", symbolStr, err)
 			continue
@@ -491,34 +492,64 @@ func (fb *FuturesBot) analyzeMomentum(history []PricePoint) (udecimal.Decimal, e
 
 	startIdx := len(history) - lookback
 
-	first, err := midPriceFromPoint(history[startIdx])
+	// Calculate momentum for LONG direction (using Ask prices)
+	firstLong, err := getPriceFromPointForSide(history[startIdx], "LONG")
 	if err != nil {
-		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first price: %w", err)
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first Ask price: %w", err)
 	}
-	last, err := midPriceFromPoint(history[len(history)-1])
+	lastLong, err := getPriceFromPointForSide(history[len(history)-1], "LONG")
 	if err != nil {
-		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last price: %w", err)
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last Ask price: %w", err)
 	}
 
-	if first.IsZero() {
+	// Calculate momentum for SHORT direction (using Bid prices)
+	firstShort, err := getPriceFromPointForSide(history[startIdx], "SHORT")
+	if err != nil {
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first Bid price: %w", err)
+	}
+	lastShort, err := getPriceFromPointForSide(history[len(history)-1], "SHORT")
+	if err != nil {
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last Bid price: %w", err)
+	}
+
+	if firstLong.IsZero() || firstShort.IsZero() {
 		return udecimal.MustFromFloat64(0), fmt.Errorf("zero reference price")
 	}
 
-	change, err := last.Sub(first).Div(first)
+	// Calculate change for LONG direction (positive = upward momentum)
+	changeLong, err := lastLong.Sub(firstLong).Div(firstLong)
 	if err != nil {
-		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate change: %w", err)
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate LONG change: %w", err)
 	}
 
-	// Log detailed momentum analysis if verbose
-	if fb.cfg.GeneralConfig.VerboseLogging {
-		firstPrice := first.InexactFloat64()
-		lastPrice := last.InexactFloat64()
-		changePercent := change.Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
-		logger.DebugFmt("Momentum analysis: first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
-			firstPrice, lastPrice, changePercent, lookback)
+	// Calculate change for SHORT direction (negative = downward momentum)
+	changeShort, err := firstShort.Sub(lastShort).Div(firstShort)
+	if err != nil {
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate SHORT change: %w", err)
 	}
 
-	return change, nil
+	// Return the stronger signal (positive for LONG, negative for SHORT)
+	if changeLong.Cmp(changeShort.Neg()) > 0 {
+		// Log detailed momentum analysis if verbose
+		if fb.cfg.GeneralConfig.VerboseLogging {
+			firstPrice := firstLong.InexactFloat64()
+			lastPrice := lastLong.InexactFloat64()
+			changePercent := changeLong.Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
+			logger.DebugFmt("Momentum analysis (LONG): first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
+				firstPrice, lastPrice, changePercent, lookback)
+		}
+		return changeLong, nil
+	} else {
+		// Log detailed momentum analysis if verbose
+		if fb.cfg.GeneralConfig.VerboseLogging {
+			firstPrice := firstShort.InexactFloat64()
+			lastPrice := lastShort.InexactFloat64()
+			changePercent := changeShort.Neg().Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
+			logger.DebugFmt("Momentum analysis (SHORT): first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
+				firstPrice, lastPrice, changePercent, lookback)
+		}
+		return changeShort.Neg(), nil
+	}
 }
 
 func (fb *FuturesBot) openPosition(symbol currency.Pair, side string) {
@@ -533,7 +564,7 @@ func (fb *FuturesBot) openPosition(symbol currency.Pair, side string) {
 		return
 	}
 
-	entryPrice, err := midPrice(book)
+	entryPrice, err := getPriceForSide(book, side)
 	if err != nil {
 		logger.ErrorFmt("Failed to parse entry price for %s: %v", symbol.String(), err)
 		return
@@ -708,38 +739,58 @@ func priceChangeFromEntry(pos *FuturesPosition, current udecimal.Decimal) (udeci
 	return pos.EntryPrice.Sub(current).Div(pos.EntryPrice)
 }
 
-func midPrice(book *arbitrage.BookTicker) (udecimal.Decimal, error) {
-	bid, err := udecimal.Parse(book.BidPrice)
-	if err != nil {
-		return udecimal.MustFromFloat64(0), err
+// getPriceForSide returns the entry price based on trade direction
+// LONG positions use Ask price (buy at ask), SHORT positions use Bid price (sell at bid)
+func getPriceForSide(book *arbitrage.BookTicker, side string) (udecimal.Decimal, error) {
+	if side == "LONG" {
+		ask, err := udecimal.Parse(book.AskPrice)
+		if err != nil {
+			return udecimal.MustFromFloat64(0), err
+		}
+		return ask, nil
+	} else { // SHORT
+		bid, err := udecimal.Parse(book.BidPrice)
+		if err != nil {
+			return udecimal.MustFromFloat64(0), err
+		}
+		return bid, nil
 	}
-	ask, err := udecimal.Parse(book.AskPrice)
-	if err != nil {
-		return udecimal.MustFromFloat64(0), err
-	}
-	total := bid.Add(ask)
-	mid, err := total.Div(udecimal.MustFromFloat64(2))
-	if err != nil {
-		return udecimal.MustFromFloat64(0), err
-	}
-	return mid, nil
 }
 
-func midPriceFromPoint(pp PricePoint) (udecimal.Decimal, error) {
-	bid, err := udecimal.Parse(pp.BidPrice)
-	if err != nil {
-		return udecimal.MustFromFloat64(0), err
+// getExitPrice returns the exit price for PnL calculations based on trade direction
+// LONG positions use Bid price (sell at bid), SHORT positions use Ask price (buy back at ask)
+func getExitPrice(book *arbitrage.BookTicker, side string) (udecimal.Decimal, error) {
+	if side == "LONG" {
+		bid, err := udecimal.Parse(book.BidPrice)
+		if err != nil {
+			return udecimal.MustFromFloat64(0), err
+		}
+		return bid, nil
+	} else { // SHORT
+		ask, err := udecimal.Parse(book.AskPrice)
+		if err != nil {
+			return udecimal.MustFromFloat64(0), err
+		}
+		return ask, nil
 	}
-	ask, err := udecimal.Parse(pp.AskPrice)
-	if err != nil {
-		return udecimal.Zero, err
+}
+
+// getPriceFromPointForSide returns the appropriate price from a PricePoint based on trade direction
+// LONG positions use Ask price (buy at ask), SHORT positions use Bid price (sell at bid)
+func getPriceFromPointForSide(pp PricePoint, side string) (udecimal.Decimal, error) {
+	if side == "LONG" {
+		ask, err := udecimal.Parse(pp.AskPrice)
+		if err != nil {
+			return udecimal.Zero, err
+		}
+		return ask, nil
+	} else { // SHORT
+		bid, err := udecimal.Parse(pp.BidPrice)
+		if err != nil {
+			return udecimal.Zero, err
+		}
+		return bid, nil
 	}
-	total := bid.Add(ask)
-	mid, err := total.Div(udecimal.MustFromFloat64(2))
-	if err != nil {
-		return udecimal.Zero, err
-	}
-	return mid, nil
 }
 
 func max(a, b int) int {
@@ -956,4 +1007,44 @@ func (fb *FuturesBot) GetSimStats() *SimulationStats {
 		StartTime:       fb.simStats.StartTime,
 		LastTradeTime:   fb.simStats.LastTradeTime,
 	}
+}
+
+// ClosePosition closes a position immediately at the current market price
+func (fb *FuturesBot) ClosePosition(symbolStr string) error {
+	fb.mu.RLock()
+	position, exists := fb.positions[symbolStr]
+	if !exists || position.Status != "OPEN" {
+		fb.mu.RUnlock()
+		return fmt.Errorf("position %s not found or not open", symbolStr)
+	}
+	side := position.Side
+	fb.mu.RUnlock()
+
+	// Get current price
+	symbolObj, ok := fb.ob.Symbols.Get(symbolStr)
+	if !ok {
+		return fmt.Errorf("symbol %s not found in orderbook", symbolStr)
+	}
+	bookTicker := symbolObj.GetBookTicker()
+	if bookTicker == nil {
+		return fmt.Errorf("no price data available for %s", symbolStr)
+	}
+
+	// Use bid price for LONG (selling) or ask price for SHORT (buying back)
+	var exitPrice udecimal.Decimal
+	var err error
+	if side == "LONG" {
+		exitPrice, err = udecimal.Parse(bookTicker.BidPrice)
+	} else {
+		exitPrice, err = udecimal.Parse(bookTicker.AskPrice)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to parse exit price: %w", err)
+	}
+
+	fb.mu.Lock()
+	fb.closePosition(symbolStr, exitPrice, "MANUAL_CLOSE")
+	fb.mu.Unlock()
+
+	return nil
 }

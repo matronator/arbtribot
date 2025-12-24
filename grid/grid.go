@@ -218,20 +218,15 @@ func (gtb *GridTradingBot) updatePriceHistory() {
 			continue
 		}
 
-		// Use mid price (average of bid and ask)
-		bidPrice, err := strconv.ParseFloat(bookTicker.BidPrice, 64)
-		if err != nil {
-			continue
-		}
+		// Use Ask price for LONG positions (grid trading only uses LONG positions)
 		askPrice, err := strconv.ParseFloat(bookTicker.AskPrice, 64)
 		if err != nil {
 			continue
 		}
-		midPrice := (bidPrice + askPrice) / 2
 
 		// Add to price history
 		pricePoint := PricePoint{
-			Price:     midPrice,
+			Price:     askPrice,
 			Timestamp: time.Now(),
 		}
 
@@ -335,9 +330,9 @@ func (gtb *GridTradingBot) isUptrend(history []PricePoint, config *GridConfig) b
 
 // openPosition opens a new trading position
 func (gtb *GridTradingBot) openPosition(symbolStr string, config *GridConfig) {
-	// Get current price
-	currentPrice := gtb.getCurrentPrice(symbolStr)
-	if currentPrice == 0 {
+	// Get entry price (Ask for LONG - buy at ask)
+	entryPrice := gtb.getEntryPrice(symbolStr)
+	if entryPrice == 0 {
 		return
 	}
 
@@ -350,14 +345,14 @@ func (gtb *GridTradingBot) openPosition(symbolStr string, config *GridConfig) {
 
 	// Calculate position size (use a small amount for safety)
 	positionSize := gtb.Config.TriangleConfig.OrderUSDCAmount
-	quantity := positionSize / currentPrice
+	quantity := positionSize / entryPrice
 
 	// Create position
 	position := &Position{
 		Symbol:       symbolStr,
 		BaseAsset:    pair.Base.String(),
 		QuoteAsset:   pair.Quote.String(),
-		EntryPrice:   currentPrice,
+		EntryPrice:   entryPrice,
 		Quantity:     quantity,
 		EntryTime:    time.Now(),
 		TargetProfit: config.ProfitTarget,
@@ -379,12 +374,12 @@ func (gtb *GridTradingBot) openPosition(symbolStr string, config *GridConfig) {
 	}
 
 	logger.InfoFmt("%s Opened position: %s at %.6f USDC (Qty: %.6f)",
-		logger.Green("BUY"), symbolStr, currentPrice, quantity)
+		logger.Green("BUY"), symbolStr, entryPrice, quantity)
 
 	gtb.TradeLogger.Info().
 		Str("action", "BUY").
 		Str("symbol", symbolStr).
-		Float64("price", currentPrice).
+		Float64("price", entryPrice).
 		Float64("quantity", quantity).
 		Float64("amount", positionSize).
 		Msg("Position opened")
@@ -438,7 +433,29 @@ func (gtb *GridTradingBot) closePosition(symbolStr string, reason string, curren
 	delete(gtb.Positions, symbolStr)
 }
 
-// getCurrentPrice gets the current price for a symbol
+// getEntryPrice gets the entry price for a LONG position (Ask price - buy at ask)
+func (gtb *GridTradingBot) getEntryPrice(symbolStr string) float64 {
+	symbol, ok := gtb.OrderBook.Symbols.Get(symbolStr)
+	if !ok {
+		return 0
+	}
+
+	bookTicker := symbol.GetBookTicker()
+	if bookTicker == nil {
+		return 0
+	}
+
+	// Use Ask price for LONG entry (buy at ask)
+	askPrice, err := strconv.ParseFloat(bookTicker.AskPrice, 64)
+	if err != nil {
+		return 0
+	}
+
+	return askPrice
+}
+
+// getCurrentPrice gets the current exit price for PnL calculations (Bid price - sell at bid)
+// Grid trading only uses LONG positions, so we use Bid for exit/PnL
 func (gtb *GridTradingBot) getCurrentPrice(symbolStr string) float64 {
 	symbol, ok := gtb.OrderBook.Symbols.Get(symbolStr)
 	if !ok {
@@ -450,16 +467,13 @@ func (gtb *GridTradingBot) getCurrentPrice(symbolStr string) float64 {
 		return 0
 	}
 
+	// Use Bid price for LONG exit (what we'd get when selling)
 	bidPrice, err := strconv.ParseFloat(bookTicker.BidPrice, 64)
 	if err != nil {
 		return 0
 	}
-	askPrice, err := strconv.ParseFloat(bookTicker.AskPrice, 64)
-	if err != nil {
-		return 0
-	}
 
-	return (bidPrice + askPrice) / 2
+	return bidPrice
 }
 
 // executeBuyOrder executes a buy order

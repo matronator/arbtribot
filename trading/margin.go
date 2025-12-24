@@ -299,8 +299,10 @@ func (mb *MarginBot) evaluateExistingPositions() {
 		// Check if price data is stale (older than 2 minutes)
 		timeSinceUpdate := time.Since(symbolData.LastUpdated)
 		if timeSinceUpdate > 2*time.Minute {
-			logger.WarningFmt("Stale price data for %s: LastUpdated=%v (%.0f seconds ago). Websocket may be disconnected.",
-				symbolStr, symbolData.LastUpdated, timeSinceUpdate.Seconds())
+			if mb.cfg.GeneralConfig.VerboseLogging {
+				logger.WarningFmt("Stale price data for %s: LastUpdated=%v (%.0f seconds ago). Websocket may be disconnected.",
+					symbolStr, symbolData.LastUpdated, timeSinceUpdate.Seconds())
+			}
 		}
 
 		// Log book ticker data to verify prices are updating
@@ -309,7 +311,8 @@ func (mb *MarginBot) evaluateExistingPositions() {
 				symbolStr, book.BidPrice, book.AskPrice, symbolData.LastUpdated, timeSinceUpdate.Seconds())
 		}
 
-		currentPrice, err := midPrice(book)
+		// Use exit price for PnL calculations (Bid for LONG to sell, Ask for SHORT to buy back)
+		currentPrice, err := getExitPrice(book, position.Side)
 		if err != nil {
 			logger.ErrorFmt("Failed to parse price for %s: %v", symbolStr, err)
 			continue
@@ -470,10 +473,10 @@ func (mb *MarginBot) scanForEntries() int {
 		}
 
 		if change.Cmp(threshold) >= 0 {
-			logger.InfoFmt("%s signal detected for %s: momentum=%.4f%% >= threshold=%.4f%%", logger.BgGreen(" LONG "), symbolStr, changeFloat, thresholdFloat)
+			logger.InfoFmt("%s signal detected for %s: momentum=%.4f%% >= threshold=%.4f%%", logger.Green("LONG"), symbolStr, changeFloat, thresholdFloat)
 			mb.openPosition(symbol, "LONG")
 		} else if change.Cmp(threshold.Neg()) <= 0 {
-			logger.InfoFmt("%s signal detected for %s: momentum=%.4f%% <= threshold=%.4f%%", logger.BgRed(" SHORT "), symbolStr, changeFloat, -thresholdFloat)
+			logger.InfoFmt("%s signal detected for %s: momentum=%.4f%% <= threshold=%.4f%%", logger.Red("SHORT"), symbolStr, changeFloat, -thresholdFloat)
 			mb.openPosition(symbol, "SHORT")
 		}
 	}
@@ -499,34 +502,64 @@ func (mb *MarginBot) analyzeMomentum(history []PricePoint) (udecimal.Decimal, er
 
 	startIdx := len(history) - lookback
 
-	first, err := midPriceFromPoint(history[startIdx])
+	// Calculate momentum for LONG direction (using Ask prices)
+	firstLong, err := getPriceFromPointForSide(history[startIdx], "LONG")
 	if err != nil {
-		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first price: %w", err)
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first Ask price: %w", err)
 	}
-	last, err := midPriceFromPoint(history[len(history)-1])
+	lastLong, err := getPriceFromPointForSide(history[len(history)-1], "LONG")
 	if err != nil {
-		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last price: %w", err)
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last Ask price: %w", err)
 	}
 
-	if first.IsZero() {
+	// Calculate momentum for SHORT direction (using Bid prices)
+	firstShort, err := getPriceFromPointForSide(history[startIdx], "SHORT")
+	if err != nil {
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse first Bid price: %w", err)
+	}
+	lastShort, err := getPriceFromPointForSide(history[len(history)-1], "SHORT")
+	if err != nil {
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to parse last Bid price: %w", err)
+	}
+
+	if firstLong.IsZero() || firstShort.IsZero() {
 		return udecimal.MustFromFloat64(0), fmt.Errorf("zero reference price")
 	}
 
-	change, err := last.Sub(first).Div(first)
+	// Calculate change for LONG direction (positive = upward momentum)
+	changeLong, err := lastLong.Sub(firstLong).Div(firstLong)
 	if err != nil {
-		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate change: %w", err)
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate LONG change: %w", err)
 	}
 
-	// Log detailed momentum analysis if verbose
-	if mb.cfg.GeneralConfig.VerboseLogging {
-		firstPrice := first.InexactFloat64()
-		lastPrice := last.InexactFloat64()
-		changePercent := change.Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
-		logger.DebugFmt("Momentum analysis: first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
-			firstPrice, lastPrice, changePercent, lookback)
+	// Calculate change for SHORT direction (negative = downward momentum)
+	changeShort, err := firstShort.Sub(lastShort).Div(firstShort)
+	if err != nil {
+		return udecimal.MustFromFloat64(0), fmt.Errorf("failed to calculate SHORT change: %w", err)
 	}
 
-	return change, nil
+	// Return the stronger signal (positive for LONG, negative for SHORT)
+	if changeLong.Cmp(changeShort.Neg()) > 0 {
+		// Log detailed momentum analysis if verbose
+		if mb.cfg.GeneralConfig.VerboseLogging {
+			firstPrice := firstLong.InexactFloat64()
+			lastPrice := lastLong.InexactFloat64()
+			changePercent := changeLong.Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
+			logger.DebugFmt("Momentum analysis (LONG): first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
+				firstPrice, lastPrice, changePercent, lookback)
+		}
+		return changeLong, nil
+	} else {
+		// Log detailed momentum analysis if verbose
+		if mb.cfg.GeneralConfig.VerboseLogging {
+			firstPrice := firstShort.InexactFloat64()
+			lastPrice := lastShort.InexactFloat64()
+			changePercent := changeShort.Neg().Mul(udecimal.MustFromFloat64(100)).InexactFloat64()
+			logger.DebugFmt("Momentum analysis (SHORT): first=%.8f, last=%.8f, change=%.4f%%, lookback=%d points",
+				firstPrice, lastPrice, changePercent, lookback)
+		}
+		return changeShort.Neg(), nil
+	}
 }
 
 // isMarginErrorPermanent checks if an error indicates that margin trading is permanently unavailable for this symbol
@@ -582,7 +615,7 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 		return
 	}
 
-	entryPrice, err := midPrice(book)
+	entryPrice, err := getPriceForSide(book, side)
 	if err != nil {
 		logger.ErrorFmt("Failed to parse entry price for %s: %v", symbolStr, err)
 		return
@@ -706,7 +739,7 @@ func (mb *MarginBot) openPosition(symbol currency.Pair, side string) {
 		mb.logSimulationTrade("OPEN", symbol.String(), position, entryPrice, udecimal.Zero, udecimal.Zero, "ENTRY", time.Duration(0))
 	}
 
-	logger.InfoFmt("%s for %s: entry=%s qty=%s", logger.BrightGreen("Opened margin ")+logger.ColorizeSide(side), symbol.String(), entryPrice.String(), validatedQty.String())
+	logger.InfoFmt("%s -> %s for %s: entry=%s qty=%s", logger.BgGreen(" OPEN "), logger.BrightGreen("Opened margin ")+logger.ColorizeSide(side), symbol.String(), entryPrice.String(), validatedQty.String())
 	mb.tradeLogger.Info().
 		Str("action", "OPEN_MARGIN_POSITION").
 		Str("symbol", symbol.String()).
@@ -861,7 +894,7 @@ func (mb *MarginBot) closePosition(symbolStr string, exitPrice udecimal.Decimal,
 		mb.logSimulationTrade("CLOSE", symbolStr, position, exitPrice, effectivePnL, profitAmount, reason, holdDuration)
 	}
 
-	logger.InfoFmt("%s for %s: P&L=%s%% amount=%s reason=%s", logger.BrightMagenta("Closed margin ")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
+	logger.InfoFmt("%s -> %s for %s: P&L=%s%% amount=%s reason=%s", logger.BgRed(" CLOSED "), logger.BrightMagenta("Closed margin ")+logger.ColorizeSide(position.Side), symbolStr, logger.ColorizePnl(effectivePnL.Mul(udecimal.MustFromFloat64(100))), profitAmount.StringFixed(4), logger.ColorizeReason(reason))
 	mb.tradeLogger.Info().
 		Str("action", "CLOSE_MARGIN_POSITION").
 		Str("symbol", symbolStr).
@@ -1334,4 +1367,44 @@ func (mb *MarginBot) GetSimStats() *SimulationStats {
 		StartTime:       mb.simStats.StartTime,
 		LastTradeTime:   mb.simStats.LastTradeTime,
 	}
+}
+
+// ClosePosition closes a position immediately at the current market price
+func (mb *MarginBot) ClosePosition(symbolStr string) error {
+	mb.mu.RLock()
+	position, exists := mb.positions[symbolStr]
+	if !exists || position.Status != "OPEN" {
+		mb.mu.RUnlock()
+		return fmt.Errorf("position %s not found or not open", symbolStr)
+	}
+	side := position.Side
+	mb.mu.RUnlock()
+
+	// Get current price
+	symbolObj, ok := mb.ob.Symbols.Get(symbolStr)
+	if !ok {
+		return fmt.Errorf("symbol %s not found in orderbook", symbolStr)
+	}
+	bookTicker := symbolObj.GetBookTicker()
+	if bookTicker == nil {
+		return fmt.Errorf("no price data available for %s", symbolStr)
+	}
+
+	// Use bid price for LONG (selling) or ask price for SHORT (buying back)
+	var exitPrice udecimal.Decimal
+	var err error
+	if side == "LONG" {
+		exitPrice, err = udecimal.Parse(bookTicker.BidPrice)
+	} else {
+		exitPrice, err = udecimal.Parse(bookTicker.AskPrice)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to parse exit price: %w", err)
+	}
+
+	mb.mu.Lock()
+	mb.closePosition(symbolStr, exitPrice, "MANUAL_CLOSE")
+	mb.mu.Unlock()
+
+	return nil
 }

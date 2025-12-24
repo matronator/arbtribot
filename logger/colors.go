@@ -15,6 +15,7 @@ func ColorizeReason(reason string) string {
 	case "TRAILING_EXIT":
 		return Green(reason)
 	case "MAX_HOLD_TIME":
+	case "MANUAL_CLOSE":
 		return Yellow(reason)
 	case "TIMEOUT":
 		return Blue(reason)

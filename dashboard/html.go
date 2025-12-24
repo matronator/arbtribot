@@ -229,6 +229,31 @@ const dashboardHTML = `<!DOCTYPE html>
             border-radius: 8px;
             margin: 12px 0;
         }
+
+        .btn-close {
+            background: #ef4444;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        .btn-close:hover {
+            background: #dc2626;
+        }
+
+        .btn-close:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .btn-close:active {
+            background: #b91c1c;
+        }
     </style>
 </head>
 <body>
@@ -437,7 +462,7 @@ const dashboardHTML = `<!DOCTYPE html>
             let html = '<table><thead><tr>';
             html += '<th>Symbol</th><th>Side</th><th>Entry Price</th><th>Current Price</th>';
             html += '<th>Quantity</th><th>Unrealized P&L</th><th>Unrealized P&L %</th>';
-            html += '<th>Entry Time</th><th>Hold Duration</th><th>Status</th>';
+            html += '<th>Entry Time</th><th>Hold Duration</th><th>Status</th><th>Action</th>';
             html += '</tr></thead><tbody>';
 
             positions.forEach(pos => {
@@ -452,6 +477,7 @@ const dashboardHTML = `<!DOCTYPE html>
                 html += '<td>' + formatTime(pos.entryTime) + '</td>';
                 html += '<td>' + pos.holdDuration + '</td>';
                 html += '<td>' + (pos.status || 'OPEN') + '</td>';
+                html += '<td><button class="btn-close" onclick="closePosition(\'' + pos.symbol + '\', this)">Close</button></td>';
                 html += '</tr>';
             });
 
@@ -491,6 +517,46 @@ const dashboardHTML = `<!DOCTYPE html>
 
             html += '</tbody></table>';
             document.getElementById('trades-content').innerHTML = html;
+        }
+
+        async function closePosition(symbol, button) {
+            if (!confirm('Are you sure you want to close position ' + symbol + ' at the current market price?')) {
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Closing...';
+
+            try {
+                const response = await fetch('/api/close-position', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ symbol: symbol })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    button.textContent = 'Closed';
+                    button.style.background = '#10b981';
+                    // Refresh positions after a short delay
+                    setTimeout(() => {
+                        updatePositions();
+                        updateStats();
+                        updateRecentTrades();
+                    }, 1000);
+                } else {
+                    alert('Error closing position: ' + (result.error || 'Unknown error'));
+                    button.disabled = false;
+                    button.textContent = 'Close';
+                }
+            } catch (error) {
+                alert('Error closing position: ' + error.message);
+                button.disabled = false;
+                button.textContent = 'Close';
+            }
         }
 
         async function updateAll() {
