@@ -6,7 +6,7 @@
       "enabled": true,
       "env": {
         "TURSO_DATABASE_URL": "libsql://devcontext-matronator.aws-eu-west-1.turso.io",
-        "TURSO_AUTH_TOKEN": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3NjU0NjE0ODMsImlkIjoiODczZDBjZTMtZWIwYS00MGQwLTkyNzktNzk4MGIwODUzYzk1IiwicmlkIjoiNGIwYTIxMzUtMTU2Yy00YmVhLWI4NzItMmMwZTM5MDg3NzI3In0.RhLmE2Yn_LEOujGnb_RFI3iNL4v3v1cdfRKNlMppcxYFEkbIwsQ8VLwPv-t9vgVen7OEZN6u58xCE0yTYFReAg"
+        "TURSO_AUTH_TOKEN": "fuck you motherfuckers, yeah I accidentally leaked it in the previous commit, but guess what, it's now invalidated, so eat a dick"
       }
     }
   }
